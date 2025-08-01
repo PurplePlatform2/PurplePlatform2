@@ -2,7 +2,7 @@
   "name": "purplebot-trading-server",
   "version": "1.0.0",
   "description": "Trading bot server for Deriv API integration",
-  "main": "App.js",
+  "main": "app.js",
   "scripts": {
     "start": "node App.js"
   },
