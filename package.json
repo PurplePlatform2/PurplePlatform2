@@ -1,0 +1,25 @@
+{
+  "name": "purplebot-trading-server",
+  "version": "1.0.0",
+  "description": "Trading bot server for Deriv API integration",
+  "main": "App.js",
+  "scripts": {
+    "start": "node App.js"
+  },
+  "dependencies": {
+    "fastify": "^4.27.0",
+    "node-fetch": "^3.3.2",
+    "ws": "^8.16.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "type": "module",
+  "keywords": [
+    "trading",
+    "bot",
+    "deriv",
+    "websockets"
+  ],
+  "license": "MIT"
+}
