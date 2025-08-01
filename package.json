@@ -4,7 +4,7 @@
   "description": "Trading bot server for Deriv API integration",
   "main": "app.js",
   "scripts": {
-    "start": "node App.js"
+    "start": "node app.js"
   },
   "dependencies": {
     "fastify": "^4.27.0",
