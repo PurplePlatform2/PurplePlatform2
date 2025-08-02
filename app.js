@@ -5,6 +5,7 @@ const { exec } = require('child_process');
 const fetch = require('node-fetch');
 
 const fastify = Fastify({ logger: true });
+fastify.register(require('@fastify/cors')); 
 
 const users = new Map();         // Map<token, { token, subscribedAt }>
 const runningTrades = new Set(); // Set<token>
