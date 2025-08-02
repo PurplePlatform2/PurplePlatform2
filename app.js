@@ -36,7 +36,7 @@ fastify.post('/unsubscribe', async (req, reply) => {
 // Check subscription
 fastify.post('/check', async (req, reply) => {
   const { token } = req.body;
-  if (!token) return reply.code(400).send({ error: 'Token is required' });
+  if (!token) return reply.code(200).send({ error: 'Token is required' });
 
   reply.send({ subscribed: users.has(token) });
 });
@@ -83,7 +83,7 @@ fastify.get('/trade', async (req, reply) => {
 // Start server
 const start = async () => {
   try {
-    await fastify.listen({ port: 3000, host: '0.0.0.0' });
+    await fastify.listen({ port: process.env.PORT || 3000, host: '0.0.0.0' });
     console.log('Server running at http://localhost:3000');
   } catch (err) {
     fastify.log.error(err);
