@@ -55,7 +55,7 @@ fastify.post('/check', async (req, reply) => {
 // Trade endpoint
 fastify.get('/trade', async (req, reply) => {
   if (runningTrades.size > 0) {
-    return reply.code(429).send({ error: 'Trade already running for some users.' });
+    console.log("error: Trade already running for some users.");
   }
 
   let prediction;
