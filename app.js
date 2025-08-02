@@ -8,11 +8,12 @@ const fastify = Fastify({ logger: true });
 
 const users = new Map();         // Map<token, { token, subscribedAt }>
 const runningTrades = new Set(); // Set<token>
+const serverStartTime = Date.now();  // Record server start time for uptime
 
 // Serve index.html
 fastify.get('/', async (req, reply) => {
   const filePath = path.join(__dirname, 'index.html');
-  reply.type('text/html').send(fs.readFileSync(filePath, 'utf-8'));
+  return reply.type('text/html').send(fs.readFileSync(filePath, 'utf-8'));
 });
 
 // Subscribe user with token only
@@ -21,7 +22,7 @@ fastify.post('/subscribe', async (req, reply) => {
   if (!token) return reply.code(400).send({ error: 'Token is required' });
 
   users.set(token, { token, subscribedAt: Date.now() });
-  reply.send({ success: true, message: 'Subscribed successfully' });
+  return reply.send({ success: true, message: 'Subscribed successfully' });
 });
 
 // Unsubscribe user
@@ -30,15 +31,15 @@ fastify.post('/unsubscribe', async (req, reply) => {
   if (!token) return reply.code(400).send({ error: 'Token is required' });
 
   users.delete(token);
-  reply.send({ success: true, message: 'Unsubscribed successfully' });
+  return reply.send({ success: true, message: 'Unsubscribed successfully' });
 });
 
 // Check subscription
 fastify.post('/check', async (req, reply) => {
   const { token } = req.body;
-  if (!token) return reply.code(200).send({ error: 'Token is required' });
+  if (!token) return reply.code(400).send({ error: 'Token is required' });
 
-  reply.send({ subscribed: users.has(token) });
+  return reply.send({ subscribed: users.has(token) });
 });
 
 // Trade endpoint: fetch prediction + run trade.js per user
@@ -57,7 +58,7 @@ fastify.get('/trade', async (req, reply) => {
 
   const promises = [];
 
-  for (const [token, info] of users.entries()) {
+  for (const [token] of users) {
     if (runningTrades.has(token)) continue;
     runningTrades.add(token);
 
@@ -77,14 +78,27 @@ fastify.get('/trade', async (req, reply) => {
   }
 
   const results = await Promise.all(promises);
-  reply.send(results);
+  return reply.send(results);
+});
+
+// New stats endpoint
+fastify.get('/stat', async (req, reply) => {
+  return reply.send({
+    totalSubscribers: users.size,
+    currentTime: new Date().toISOString(),
+    startTime: new Date(serverStartTime).toISOString(),
+    uptime: Math.floor((Date.now() - serverStartTime) / 1000)
+  });
 });
 
 // Start server
 const start = async () => {
   try {
-    await fastify.listen({ port: process.env.PORT || 3000, host: '0.0.0.0' });
-    console.log('Server running at http://localhost:3000');
+    await fastify.listen({ 
+      port: process.env.PORT || 3000, 
+      host: '0.0.0.0' 
+    });
+    console.log(`Server running at ${fastify.server.address().port}`);
   } catch (err) {
     fastify.log.error(err);
     process.exit(1);
