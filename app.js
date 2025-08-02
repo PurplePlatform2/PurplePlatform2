@@ -5,19 +5,28 @@ const { exec } = require('child_process');
 const fetch = require('node-fetch');
 
 const fastify = Fastify({ logger: true });
-fastify.register(require('@fastify/cors')); 
 
-const users = new Map();         // Map<token, { token, subscribedAt }>
+// Enable CORS
+fastify.register(require('@fastify/cors'));
+
+// Serve static files (including index.html, styles.css, etc.)
+fastify.register(require('@fastify/static'), {
+  root: path.join(__dirname),   // Serve from current directory
+  prefix: '/',                  // Serve at root (e.g., /styles.css)
+});
+
+// Store users and running trade states
+const users = new Map();        // Map<token, { token, subscribedAt }>
 const runningTrades = new Set(); // Set<token>
-const serverStartTime = Date.now();  // Record server start time for uptime
+const serverStartTime = Date.now(); // Server start time for uptime
 
-// Serve index.html
+// Serve index.html on root
 fastify.get('/', async (req, reply) => {
   const filePath = path.join(__dirname, 'index.html');
   return reply.type('text/html').send(fs.readFileSync(filePath, 'utf-8'));
 });
 
-// Subscribe user with token only
+// Subscribe endpoint
 fastify.post('/subscribe', async (req, reply) => {
   const { token } = req.body;
   if (!token) return reply.code(400).send({ error: 'Token is required' });
@@ -26,7 +35,7 @@ fastify.post('/subscribe', async (req, reply) => {
   return reply.send({ success: true, message: 'Subscribed successfully' });
 });
 
-// Unsubscribe user
+// Unsubscribe endpoint
 fastify.post('/unsubscribe', async (req, reply) => {
   const { token } = req.body;
   if (!token) return reply.code(400).send({ error: 'Token is required' });
@@ -35,7 +44,7 @@ fastify.post('/unsubscribe', async (req, reply) => {
   return reply.send({ success: true, message: 'Unsubscribed successfully' });
 });
 
-// Check subscription
+// Check subscription status
 fastify.post('/check', async (req, reply) => {
   const { token } = req.body;
   if (!token) return reply.code(400).send({ error: 'Token is required' });
@@ -43,7 +52,7 @@ fastify.post('/check', async (req, reply) => {
   return reply.send({ subscribed: users.has(token) });
 });
 
-// Trade endpoint: fetch prediction + run trade.js per user
+// Trade endpoint
 fastify.get('/trade', async (req, reply) => {
   if (runningTrades.size > 0) {
     return reply.code(429).send({ error: 'Trade already running for some users.' });
@@ -82,7 +91,7 @@ fastify.get('/trade', async (req, reply) => {
   return reply.send(results);
 });
 
-// New stats endpoint
+// Stats endpoint
 fastify.get('/stat', async (req, reply) => {
   return reply.send({
     totalSubscribers: users.size,
@@ -95,11 +104,11 @@ fastify.get('/stat', async (req, reply) => {
 // Start server
 const start = async () => {
   try {
-    await fastify.listen({ 
-      port: process.env.PORT || 3000, 
-      host: '0.0.0.0' 
+    await fastify.listen({
+      port: process.env.PORT || 3000,
+      host: '0.0.0.0'
     });
-    console.log(`Server running at ${fastify.server.address().port}`);
+    console.log(`Server running at port ${fastify.server.address().port}`);
   } catch (err) {
     fastify.log.error(err);
     process.exit(1);
