@@ -39,7 +39,7 @@ ws.onmessage = ({ data }) => {
 
     case "proposal":
       console.log("📨 Buying Proposal:", res.proposal.id);
-      ws.send(JSON.stringify({ buy: res.proposal.id, price: +Number(STAKE).toFixed(2) }));
+      ws.send(JSON.stringify({ buy: res.proposal.id, price: +Number(STAKE).toFixed(1) }));
             break;
 
     case "buy":
@@ -113,7 +113,7 @@ async function fetchPredictionAndTrade() {
       proposal: 1,
       symbol: SYMBOL,
       contract_type: direction,
-      amount: STAKE,
+      amount: +Number(STAKE).toFixed(1),
       basis: "stake",
       currency: "USD",
       multiplier: MULTIPLIER
