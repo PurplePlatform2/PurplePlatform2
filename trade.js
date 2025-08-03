@@ -39,8 +39,8 @@ ws.onmessage = ({ data }) => {
 
     case "proposal":
       console.log("📨 Buying Proposal:", res.proposal.id);
-      ws.send(JSON.stringify({ buy: res.proposal.id, price: STAKE }));
-      break;
+      ws.send(JSON.stringify({ buy: res.proposal.id, price: +Number(STAKE).toFixed(2) }));
+    break;
 
     case "buy":
       contractId = res.buy.contract_id;
