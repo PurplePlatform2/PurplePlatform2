@@ -39,8 +39,8 @@ ws.onmessage = ({ data }) => {
 
     case "proposal":
       console.log("📨 Buying Proposal:", res.proposal.id);
-      ws.send(JSON.stringify({ buy: res.proposal.id, price: +Number(STAKE).toFixed(1) }));
-    break;
+      ws.send(JSON.stringify({ buy: res.proposal.id, price: +Number(STAKE).toFixed(2) }));
+            break;
 
     case "buy":
       contractId = res.buy.contract_id;
@@ -71,40 +71,57 @@ ws.onmessage = ({ data }) => {
 };
 
 // 🧠 Fetch prediction and determine trade direction
+// 🧠 Improved Fetch prediction and determine trade direction
 async function fetchPredictionAndTrade() {
   try {
-    const res = process.argv[3] ? { json: async () => JSON.parse(process.argv[3]) } : await fetch("https://purplebot-official.onrender.com/predict");
+    const res = process.argv[3]
+      ? { json: async () => JSON.parse(process.argv[3]) }
+      : await fetch("https://purplebot-official.onrender.com/predict");
+
     const { predicted_high, predicted_low, last_candle_high, last_candle_low } = await res.json();
 
     console.log("📈 Prediction:", { predicted_high, predicted_low });
     console.log("📉 Last Candle:", { last_candle_high, last_candle_low });
 
+    const actual_range = last_candle_high - last_candle_low;
+    const predicted_range = predicted_high - predicted_low;
+    const range_ratio = predicted_range / actual_range;
+
+    const predicted_mid = (predicted_high + predicted_low) / 2;
+    const last_mid = (last_candle_high + last_candle_low) / 2;
+    const bias = predicted_mid - last_mid;
+    const bias_strength = bias / actual_range;
+
+    console.log("📐 Range Ratio:", range_ratio.toFixed(3));
+    console.log("⚖️ Bias Strength:", bias_strength.toFixed(3));
+
     let direction = null;
 
-    if (predicted_high > last_candle_high) {
+    if (range_ratio > 1.1 && bias_strength > 0.25) {
       direction = "MULTUP";
-      console.log("🟢 Signal: BUY (MULTUP)");
-    } else if (predicted_low < last_candle_low) {
+      console.log("🟢 Strong BUY signal");
+    } else if (range_ratio > 1.1 && bias_strength < -0.25) {
       direction = "MULTDOWN";
-      console.log("🔴 Signal: SELL (MULTDOWN)");
+      console.log("🔴 Strong SELL signal");
     } else {
-      console.log("⚪️ No clear signal. Exiting.");
+      console.log("⚪️ No strong signal. Skipping.");
       ws.close();
       return;
     }
 
     ws.send(JSON.stringify({
-  proposal: 1,
-  symbol: SYMBOL,
-  contract_type: direction,
-  amount: +Number(STAKE).toFixed(1),  
-  basis: "stake",
-  currency: "USD",
-  multiplier: MULTIPLIER
-}));
+      proposal: 1,
+      symbol: SYMBOL,
+      contract_type: direction,
+      amount: STAKE,
+      basis: "stake",
+      currency: "USD",
+      multiplier: MULTIPLIER
+    }));
 
   } catch (err) {
     console.error("❌ Failed to fetch prediction:", err.message);
     ws.close();
   }
 }
+
