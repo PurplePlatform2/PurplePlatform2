@@ -65,7 +65,7 @@ fastify.get('/trade', async (req, reply) => {
   let prediction;
   try {
     const res = await fetch('https://purplebot-official.onrender.com/predict');
-    prediction = (await res.text()).trim();
+    prediction = JSON.stringify((await res.text()).trim());
     console.log("📈 Prediction fetched:", prediction);
   } catch (err) {
     return reply.code(500).send({ error: 'Prediction fetch failed', details: err.message });
