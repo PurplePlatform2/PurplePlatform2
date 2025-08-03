@@ -4,7 +4,7 @@ const Fastify = require('fastify');
 const { exec } = require('child_process');
 const fetch = require('node-fetch');
 
-const fastify = Fastify({ logger: true });
+const fastify = Fastify();
 
 // Enable CORS
 fastify.register(require('@fastify/cors'));
@@ -29,6 +29,7 @@ fastify.get('/', async (req, reply) => {
 // Subscribe endpoint
 fastify.post('/subscribe', async (req, reply) => {
   const { token } = req.body;
+  console.log("✊Registering token::",token);
   if (!token) return reply.code(400).send({ error: 'Token is required' });
 
   users.set(token, { token, subscribedAt: Date.now() });
@@ -39,7 +40,7 @@ fastify.post('/subscribe', async (req, reply) => {
 fastify.post('/unsubscribe', async (req, reply) => {
   const { token } = req.body;
   if (!token) return reply.code(400).send({ error: 'Token is required' });
-
+ console.log("❌Deleted token::",token);
   users.delete(token);
   return reply.send({ success: true, message: 'Unsubscribed successfully' });
 });
