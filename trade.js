@@ -39,7 +39,7 @@ ws.onmessage = ({ data }) => {
 
     case "proposal":
       console.log("📨 Buying Proposal:", res.proposal.id);
-      ws.send(JSON.stringify({ buy: res.proposal.id, price: +Number(STAKE).toFixed(2) }));
+      ws.send(JSON.stringify({ buy: res.proposal.id, price: +Number(STAKE).toFixed(1) }));
     break;
 
     case "buy":
@@ -94,14 +94,14 @@ async function fetchPredictionAndTrade() {
     }
 
     ws.send(JSON.stringify({
-      proposal: 1,
-      symbol: SYMBOL,
-      contract_type: direction,
-      amount: STAKE,
-      basis: "stake",
-      currency: "USD",
-      multiplier: MULTIPLIER
-    }));
+  proposal: 1,
+  symbol: SYMBOL,
+  contract_type: direction,
+  amount: +Number(STAKE).toFixed(1),  
+  basis: "stake",
+  currency: "USD",
+  multiplier: MULTIPLIER
+}));
 
   } catch (err) {
     console.error("❌ Failed to fetch prediction:", err.message);
