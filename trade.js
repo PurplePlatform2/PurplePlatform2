@@ -1,12 +1,12 @@
 const ws = new (require('ws'))('wss://ws.derivws.com/websockets/v3?app_id=1089');
 const TOKEN = process.argv[2] || "JklMzewtX7Da9mT";
 const SYMBOL = "stpRNG";
-const STAKE = 2000;
 const MULTIPLIER = 5000;
 
 let contractId = null;
 let sold = false;
 let initialBalance = null;
+let STAKE= 2000;
 
 ws.onopen = () => {
   console.log("📡 Connecting...");
@@ -17,7 +17,7 @@ ws.onmessage = ({ data }) => {
   const res = JSON.parse(data);
   console.log("📥", res);
 
-  if (res.error) return console.error("❌", res.error.message), ws.close();
+  if  (res.error) return console.error("❌", res.error.message), ws.close();
 
   switch (res.msg_type) {
     case "authorize":
@@ -28,8 +28,9 @@ ws.onmessage = ({ data }) => {
     case "balance":
       if (initialBalance === null) {
         initialBalance = res.balance.balance;
-        console.log("💰 Balance before trade:", initialBalance);
-        fetchPredictionAndTrade();
+       STAKE = Math.min(Math.max(initialBalance*0.01, 1), 2000);
+         console.log(`💰 Balance before trade: ${initialBalance}\n💵 Stake = ${STAKE}`);
+         fetchPredictionAndTrade();
       } else {
         console.log("💸 Balance after trade:", res.balance.balance);
         ws.close();
