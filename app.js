@@ -3,7 +3,6 @@ const fs = require('fs');
 const Fastify = require('fastify');
 const { exec } = require('child_process');
 const fetch = require('node-fetch');
-const pLimit = require('p-limit');
 
 const fastify = Fastify();
 fastify.register(require('@fastify/cors'));
@@ -12,10 +11,10 @@ fastify.register(require('@fastify/static'), {
   prefix: '/',
 });
 
-const users = new Map();         // Map<token, { token, subscribedAt }>
-const runningTrades = new Set(); // Set<token>
+const users = new Map();              // Map<token, { token, subscribedAt }>
+const runningTrades = new Set();      // Set<token>
+const tradeProcesses = new Map();     // Map<token, child_process>
 const serverStartTime = Date.now();
-const MAX_PARALLEL_TRADES = 5;
 
 // Serve index.html on root
 fastify.get('/', async (req, reply) => {
@@ -37,7 +36,10 @@ fastify.post('/unsubscribe', async (req, reply) => {
   const { token } = req.body;
   if (!token) return reply.code(400).send({ error: 'Token is required' });
   users.delete(token);
-  runningTrades.delete(token); // Clean up in case trade was running
+  runningTrades.delete(token);
+  const proc = tradeProcesses.get(token);
+  if (proc) proc.kill('SIGKILL');
+  tradeProcesses.delete(token);
   console.log("❌ Deleted token:", token);
   return reply.send({ success: true, message: 'Unsubscribed successfully' });
 });
@@ -69,44 +71,66 @@ fastify.get('/trade', async (req, reply) => {
     return reply.code(500).send({ error: 'Prediction fetch failed', details: err.message });
   }
 
-  const limit = pLimit(MAX_PARALLEL_TRADES);
   const promises = activeUsers.map(([token]) => {
     runningTrades.add(token);
     const cmd = `node trade.js ${token} ${prediction}`;
     console.log(`🚀 Launching trade for ${token}: ${cmd}`);
 
-    return limit(() =>
-      new Promise((resolve) => {
-        const process = exec(cmd);
+    return new Promise((resolve) => {
+      const process = exec(cmd);
+      tradeProcesses.set(token, process);
 
-        process.stdout.on('data', (data) => {
-          console.log(`📤 ${token} STDOUT: ${data.trim()}`);
-        });
+      process.stdout.on('data', (data) => {
+        console.log(`📤 ${token} STDOUT: ${data.trim()}`);
+      });
 
-        process.stderr.on('data', (data) => {
-          console.error(`🛑 ${token} STDERR: ${data.trim()}`);
-        });
+      process.stderr.on('data', (data) => {
+        console.error(`🛑 ${token} STDERR: ${data.trim()}`);
+      });
 
-        process.on('close', (code) => {
-          runningTrades.delete(token);
-          if (code === 0) {
-            resolve({ token, result: `Trade completed successfully` });
-          } else {
-            resolve({ token, error: `Trade exited with code ${code}` });
-          }
-        });
+      process.on('close', (code) => {
+        runningTrades.delete(token);
+        tradeProcesses.delete(token);
+        if (code === 0) {
+          resolve({ token, result: `Trade completed successfully` });
+        } else {
+          resolve({ token, error: `Trade exited with code ${code}` });
+        }
+      });
 
-        process.on('error', (err) => {
-          runningTrades.delete(token);
-          console.error(`❌ ${token} ERROR: ${err.message}`);
-          resolve({ token, error: err.message });
-        });
-      })
-    );
+      process.on('error', (err) => {
+        runningTrades.delete(token);
+        tradeProcesses.delete(token);
+        console.error(`❌ ${token} ERROR: ${err.message}`);
+        resolve({ token, error: err.message });
+      });
+    });
   });
 
   const results = await Promise.all(promises);
   return reply.send(results);
+});
+
+// Cancel all running trades
+fastify.get('/cancel', async (req, reply) => {
+  const cancelled = [];
+
+  for (const [token, proc] of tradeProcesses.entries()) {
+    try {
+      proc.kill('SIGKILL');
+      cancelled.push(token);
+      console.log(`🛑 Cancelled trade for ${token}`);
+    } catch (err) {
+      console.error(`❌ Error cancelling ${token}: ${err.message}`);
+    }
+    runningTrades.delete(token);
+    tradeProcesses.delete(token);
+  }
+
+  return reply.send({
+    cancelledCount: cancelled.length,
+    cancelledTokens: cancelled
+  });
 });
 
 // Stats endpoint
