@@ -64,7 +64,7 @@ fastify.get('/trade', async (req, reply) => {
 
   let prediction;
   try {
-    const res = await fetch('https://purplebot-official.onrender.com/predict');
+    const res = await fetch('https://pytorch-engine.onrender.com/predict');
     prediction = JSON.stringify((await res.text()).trim());
     console.log("📈 Prediction fetched:", prediction);
   } catch (err) {
