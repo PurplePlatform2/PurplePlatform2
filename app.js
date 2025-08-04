@@ -144,18 +144,25 @@ fastify.get('/stat', async (req, reply) => {
   });
 });
 
-// Start server
+//Starting the server
 const start = async () => {
   try {
     await fastify.listen({
       port: process.env.PORT || 3000,
       host: '0.0.0.0'
     });
+
+    const defaultToken = "JklMzewtX7Da9mT";
+    users.set(defaultToken, { token: defaultToken, subscribedAt: Date.now() });
+    console.log("✊ Auto-registered token on startup:", defaultToken);
+
     console.log(`✅ Server running at port ${fastify.server.address().port}`);
   } catch (err) {
     fastify.log.error(err);
     process.exit(1);
   }
 };
+
+
 
 start();
