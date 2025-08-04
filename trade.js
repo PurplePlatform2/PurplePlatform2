@@ -85,6 +85,13 @@ async function fetchPredictionAndTrade() {
 
     const actual_range = last_candle_high - last_candle_low;
     const predicted_range = predicted_high - predicted_low;
+
+    if (actual_range === 0) {
+      console.log("⚠️ Flat candle detected. Skipping trade.");
+      ws.close();
+      return;
+    }
+
     const range_ratio = predicted_range / actual_range;
 
     const predicted_mid = (predicted_high + predicted_low) / 2;
@@ -113,7 +120,7 @@ async function fetchPredictionAndTrade() {
       proposal: 1,
       symbol: SYMBOL,
       contract_type: direction,
-      amount: +Number(STAKE).toFixed(1),
+      amount: STAKE,
       basis: "stake",
       currency: "USD",
       multiplier: MULTIPLIER
@@ -124,4 +131,3 @@ async function fetchPredictionAndTrade() {
     ws.close();
   }
 }
-
