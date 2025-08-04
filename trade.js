@@ -120,7 +120,7 @@ async function fetchPredictionAndTrade() {
       proposal: 1,
       symbol: SYMBOL,
       contract_type: direction,
-      amount: STAKE,
+      amount: +Number(STAKE).toFixed(1),
       basis: "stake",
       currency: "USD",
       multiplier: MULTIPLIER
