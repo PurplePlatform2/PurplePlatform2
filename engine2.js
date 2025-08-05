@@ -1,9 +1,9 @@
-const token = process.argv[2] || 'JklMzewtX7Da9mT'; // 🔐 Replace with your real token
+const token = 'JklMzewtX7Da9mT'; // 🔐 Replace with your real token
 const stake = 1;
 const marketSymbol = 'stpRNG';
 const duration = 3;
 
-let ws = new WebSocket('wss://ws.derivws.com/websockets/v3?app_id=1089');
+const ws = new (require('ws'))('wss://ws.derivws.com/websockets/v3?app_id=85077');
 let recentTicks = [];
 let waitingForBuy = false; // Cooldown
 
