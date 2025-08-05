@@ -1,4 +1,4 @@
-const token = 'JklMzewtX7Da9mT'; // 🔐 Replace with your real token
+const token = process.argv[2] || 'JklMzewtX7Da9mT'; // 🔐 Replace with your real token
 const stake = 1;
 const marketSymbol = 'stpRNG';
 const duration = 3;
