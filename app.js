@@ -14,6 +14,7 @@ fastify.register(require('@fastify/static'), {
 const users = new Map();              // Map<token, { token, subscribedAt }>
 const runningTrades = new Set();      // Set<token>
 const tradeProcesses = new Map();     // Map<token, child_process>
+const engineProcesses = new Map();    // Map<token, child_process>
 const serverStartTime = Date.now();
 
 // Serve index.html on root
@@ -37,9 +38,15 @@ fastify.post('/unsubscribe', async (req, reply) => {
   if (!token) return reply.code(400).send({ error: 'Token is required' });
   users.delete(token);
   runningTrades.delete(token);
-  const proc = tradeProcesses.get(token);
-  if (proc) proc.kill('SIGKILL');
+
+  const tradeProc = tradeProcesses.get(token);
+  if (tradeProc) tradeProc.kill('SIGKILL');
   tradeProcesses.delete(token);
+
+  const engineProc = engineProcesses.get(token);
+  if (engineProc) engineProc.kill('SIGKILL');
+  engineProcesses.delete(token);
+
   console.log("❌ Deleted token:", token);
   return reply.send({ success: true, message: 'Unsubscribed successfully' });
 });
@@ -133,18 +140,64 @@ fastify.get('/cancel', async (req, reply) => {
   });
 });
 
+// Run engine2.js for all users if not running
+fastify.get('/engine', async (req, reply) => {
+  const report = [];
+
+  const tasks = Array.from(users.keys()).map((token) => {
+    return new Promise((resolve) => {
+      const existing = engineProcesses.get(token);
+      if (existing && !existing.killed) {
+        report.push({ token, status: 'already running' });
+        return resolve();
+      }
+
+      const cmd = `node engine2.js ${token}`;
+      console.log(`⚙️ Running engine for ${token}: ${cmd}`);
+      const proc = exec(cmd);
+
+      engineProcesses.set(token, proc);
+
+      proc.stdout.on('data', (data) => {
+        console.log(`⚙️ ${token} ENGINE STDOUT: ${data.trim()}`);
+      });
+
+      proc.stderr.on('data', (data) => {
+        console.error(`⚠️ ${token} ENGINE STDERR: ${data.trim()}`);
+      });
+
+      proc.on('close', (code) => {
+        engineProcesses.delete(token);
+        console.log(`✅ ${token} ENGINE exited with code ${code}`);
+      });
+
+      proc.on('error', (err) => {
+        engineProcesses.delete(token);
+        console.error(`❌ ${token} ENGINE ERROR: ${err.message}`);
+      });
+
+      report.push({ token, status: 'started' });
+      resolve();
+    });
+  });
+
+  await Promise.all(tasks);
+  return reply.send({ report });
+});
+
 // Stats endpoint
 fastify.get('/stat', async (req, reply) => {
   return reply.send({
     totalSubscribers: users.size,
     runningTrades: [...runningTrades],
+    runningEngines: [...engineProcesses.keys()],
     currentTime: new Date().toISOString(),
     startTime: new Date(serverStartTime).toISOString(),
     uptime: Math.floor((Date.now() - serverStartTime) / 1000)
   });
 });
 
-//Starting the server
+// Start the server
 const start = async () => {
   try {
     await fastify.listen({
@@ -162,7 +215,5 @@ const start = async () => {
     process.exit(1);
   }
 };
-
-
 
 start();
