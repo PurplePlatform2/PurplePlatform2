@@ -1,7 +1,7 @@
-const ws = new (require('ws'))('wss://ws.derivws.com/websockets/v3?app_id=1089');
+const ws = new (require('ws'))('wss://ws.derivws.com/websockets/v3?app_id=85077');
 const TOKEN = process.argv[2] || "JklMzewtX7Da9mT";
 const SYMBOL = "stpRNG";
-const MULTIPLIER = 5000;
+const MULTIPLIER = 50;
 
 let contractId = null;
 let sold = false;
