@@ -55,8 +55,8 @@
   <!-- Floating Action Bar -->
   <footer class="fab-bar">
     <div class="fab-container">
-      <button class="fab-nav" title="Home" onclick = "fullScreen(document.getElementById('chart'),0);"><span class="material-icons">home</span></button>
-      <button class="fab-nav" title="Chart" onclick = "fullScreen(document.getElementById('chart'),1);"><span class="material-icons">show_chart</span></button>
+      <button class="fab-nav" title="Home" ><span class="material-icons">home</span></button>
+      <button class="fab-nav" title="Chart" ><span class="material-icons">show_chart</span></button>
 
       <button id="sell-btn" class="fab-extended red hidden">
         <span class="material-icons">call_received</span> Sell
@@ -69,7 +69,7 @@
         <span id="fabIcon" class="material-icons">add</span>
       </button>
 
-      <button class="fab-nav" title="History" id = "his-but"><span class="material-icons">history</span></button>
+      <button class="fab-nav" title="History" id ="his-but"><span class="material-icons">history</span></button>
       <button class="fab-nav" title="Bot"><span class="material-icons">smart_toy</span></button>
     </div>
   </footer>
@@ -84,7 +84,7 @@
     </div>
   </div>
 
-  <div class="history-container hidden" id = "his-con">
+  <div class="history-container hidden" id ="his-con">
     <h2>📜 Trade History</h2>
     <div class="filter-bar">
       <div class="date-input">
@@ -101,113 +101,7 @@
   </div>
 
   <script type="module" src="./scripts/main.js"></script>
-<script>
-     function fullScreen(el, toggle = null, iconEl = null) {
-  const isActive = el.dataset.fullscreen === "true";
-  toggle = toggle ?? !isActive;
 
-  let overlay = document.getElementById("fullscreen-overlay");
-  if (!overlay) {
-    overlay = document.createElement("div");
-    overlay.id = "fullscreen-overlay";
-    Object.assign(overlay.style, {
-      position: "fixed",
-      top: 0,
-      left: 0,
-      width: "100vw",
-      height: "100vh",
-      background: "rgba(0,0,0,0.6)",
-      opacity: 0,
-      zIndex: 9998,
-      transition: "opacity 0.6s ease",
-      pointerEvents: "none",
-    });
-    document.body.appendChild(overlay);
-  }
-
-  if (toggle) {
-    const r = el.getBoundingClientRect();
-    el.dataset.fullscreen = "true";
-    el.dataset.originalStyle = el.style.cssText || "";
-
-    // Hide other UI except footer
-    document.querySelectorAll(".fullscreen-hide").forEach(e => {
-      if (e.classList.contains("hidden")) {
-        e.dataset.hiddenBefore = "true";
-      } else {
-        e.dataset.hiddenBefore = "false";
-        e.classList.add("hidden");
-      }
-    });
-
-    document.body.style.overflow = "hidden";
-
-    Object.assign(el.style, {
-      transition: "all 0.6s ease",
-      transform: "scale(1)",
-      position: "fixed",
-      top: `${r.top}px`,
-      left: `${r.left}px`,
-      width: `${r.width}px`,
-      height: `${r.height}px`,
-      zIndex: 9999,
-      background: "#000",
-      boxShadow: "0 0 40px rgba(0,0,0,0.6)",
-      display: "flex",
-      flexDirection: "column",
-      alignItems: "stretch",
-    });
-
-    requestAnimationFrame(() => {
-      Object.assign(el.style, {
-        top: "0",
-        left: "0",
-        width: "100vw",
-        height: "100vh",
-        transform: "scale(1.01)",
-      });
-      overlay.style.opacity = "1";
-
-      setTimeout(() => {
-        const chart = window.chartView?.getChart?.();
-        const chartDiv = el.querySelector("#chart");
-        if (chart && chartDiv) {
-          chart.resize(chartDiv.clientWidth, chartDiv.clientHeight);
-        }
-      }, 650);
-    });
-
-    if (iconEl) iconEl.textContent = "fullscreen_exit";
-  } else {
-    el.dataset.fullscreen = "false";
-    el.style.transition = "all 0.6s ease";
-    el.style.transform = "scale(0.98)";
-    overlay.style.opacity = "0";
-
-    setTimeout(() => {
-      el.style.cssText = el.dataset.originalStyle || "";
-
-      document.querySelectorAll(".fullscreen-hide").forEach(e => {
-        if (e.dataset.hiddenBefore === "false") {
-          e.classList.remove("hidden");
-        }
-        delete e.dataset.hiddenBefore;
-      });
-
-      document.body.style.overflow = "";
-
-      const chart = window.chartView?.getChart?.();
-      const chartDiv = el.querySelector("#chart");
-      if (chart && chartDiv) {
-        chart.resize(chartDiv.clientWidth, chartDiv.clientHeight);
-      }
-    }, 600);
-
-    if (iconEl) iconEl.textContent = "fullscreen";
-  }
-}
-
- </script>
  </body>
       </html>
           
