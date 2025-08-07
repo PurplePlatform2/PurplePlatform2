@@ -19,7 +19,7 @@ const themeToggle = $('themeToggle');
 // FAB Toggle
 if (fab) {
   fab.onclick = () => {
-    if (!yAuth || yAuth.readystate) {
+    if (!yAuth ) {
       showToast("⚠️ Trading Not Allowed (Not Authorized)");
       const loginCard = $('login-card');
       if (loginCard) loginCard.classList.remove('hidden');
