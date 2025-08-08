@@ -54,38 +54,35 @@ fastify.post('/check', async (req, reply) => {
   if (!token) return reply.code(400).send({ error: 'Token is required' });
   return reply.send({ subscribed: users.has(token) });
 });
-
-// Trade endpoint with check/start logic
+// Trade endpoint without pre-fetch
 fastify.get('/trade', async (req, reply) => {
   const report = [];
 
   for (const [token] of users.entries()) {
     const existingProc = tradeProcesses.get(token);
+
+    // If trade already running, skip starting another
     if (existingProc && !existingProc.killed) {
       report.push({ token, status: 'Trading Continues' });
       continue;
     }
 
-    let prediction;
-    try {
-      const res = await fetch('https://pytorch-engine.onrender.com/predict');
-      prediction = JSON.stringify((await res.text()).trim());
-      console.log(`📈 Prediction for ${token}:`, prediction);
-    } catch (err) {
-      report.push({ token, error: 'Prediction fetch failed', details: err.message });
-      continue;
-    }
-
     try {
       runningTrades.add(token);
-      const cmd = `node trade.js ${token} ${prediction}`;
-      console.log(`🚀 Starting trade for ${token}: ${cmd}`);
-      const process = exec(cmd);
 
+      // Pass only token; trade.js will handle fetching prediction
+      const cmd = `node trade.js ${token}`;
+      console.log(`🚀 Starting trade for ${token}: ${cmd}`);
+
+      const process = exec(cmd);
       tradeProcesses.set(token, process);
 
-      process.stdout.on('data', data => console.log(`📤 ${token} STDOUT: ${data.trim()}`));
-      process.stderr.on('data', data => console.error(`🛑 ${token} STDERR: ${data.trim()}`));
+      process.stdout.on('data', data => 
+        console.log(`📤 ${token} STDOUT: ${data.trim()}`)
+      );
+      process.stderr.on('data', data => 
+        console.error(`🛑 ${token} STDERR: ${data.trim()}`)
+      );
 
       process.on('close', code => {
         runningTrades.delete(token);
@@ -107,6 +104,7 @@ fastify.get('/trade', async (req, reply) => {
     }
   }
 
+  // Send back immediately without waiting for any fetch
   return reply.send(report);
 });
 
