@@ -13,6 +13,9 @@ const CONFIG = {
     RETRY_BASE_DELAY: 3000
 };
 
+// WebSocket ready states
+const WS_STATES = { CONNECTING: 0, OPEN: 1, CLOSING: 2, CLOSED: 3 };
+
 // === Trading State ===
 const TRADING_STATE = {
     token: typeof process !== 'undefined' ? process.argv[2] || 'JklMzewtX7Da9mT' : 'JklMzewtX7Da9mT',
@@ -46,13 +49,16 @@ const getWebSocketClass = () => {
     return require('ws');
 };
 
+// ------- Robust safeSend / flushQueue -------
 const safeSend = (data) => {
     try {
-        if (ws && ws.readyState === ws.OPEN) {
+        if (ws && ws.readyState === WS_STATES.OPEN) {
             ws.send(JSON.stringify(data));
             return true;
         }
+        // not open yet — queue and debug
         messageQueue.push(data);
+        console.log('🔁 Message queued (socket not open):', data);
         return false;
     } catch (error) {
         console.error('⚠️ Send error:', error);
@@ -61,9 +67,17 @@ const safeSend = (data) => {
 };
 
 const flushQueue = () => {
-    while (messageQueue.length > 0 && ws && ws.readyState === ws.OPEN) {
+    while (messageQueue.length > 0 && ws && ws.readyState === WS_STATES.OPEN) {
         const msg = messageQueue.shift();
-        ws.send(JSON.stringify(msg));
+        try {
+            ws.send(JSON.stringify(msg));
+            console.log('✅ Flushed queued message:', msg);
+        } catch (err) {
+            console.error('⚠️ Flush send failed:', err, msg);
+            // push back and break to avoid tight loop
+            messageQueue.unshift(msg);
+            break;
+        }
     }
 };
 
@@ -80,35 +94,67 @@ const reconnectWithBackoff = () => {
     setTimeout(initWebSocket, delay);
 };
 
+// ------- Cross-env initWebSocket (browser + node 'ws') -------
 const initWebSocket = () => {
     const WebSocketClass = getWebSocketClass();
     ws = new WebSocketClass(CONFIG.WS_URL);
 
-    ws.onopen = () => {
+    const onOpen = () => {
         isConnected = true;
         TRADING_STATE.reconnectAttempts = 0;
         console.log('🔌 WebSocket connected');
+        // Normalize ready state numeric values if using class constants
+        // If the WebSocket class exposes OPEN as a static, keep WS_STATES in sync
+        if (WebSocketClass.OPEN !== undefined) {
+            WS_STATES.OPEN = WebSocketClass.OPEN;
+            WS_STATES.CONNECTING = WebSocketClass.CONNECTING ?? WS_STATES.CONNECTING;
+            WS_STATES.CLOSING = WebSocketClass.CLOSING ?? WS_STATES.CLOSING;
+            WS_STATES.CLOSED = WebSocketClass.CLOSED ?? WS_STATES.CLOSED;
+        }
         flushQueue();
         handleWsOpen();
     };
 
-    ws.onmessage = (msg) => {
+    const onMessage = (raw) => {
+        // adapt browser MessageEvent and node data
+        const rawData = raw && raw.data !== undefined ? raw.data : raw;
         try {
-            handleWsMessage(msg);
+            handleWsMessage({ data: rawData });
         } catch (error) {
             console.error('⚠️ Message handling error:', error);
         }
     };
 
-    ws.onerror = (error) => {
-        console.error('⚠️ WebSocket error:', error.message || error);
+    const onError = (err) => {
+        console.error('⚠️ WebSocket error:', err && (err.message || err));
     };
 
-    ws.onclose = () => {
+    const onClose = (code, reason) => {
         isConnected = false;
-        console.warn('🔌 WebSocket disconnected');
+        console.warn('🔌 WebSocket disconnected', code, reason);
         reconnectWithBackoff();
     };
+
+    // Bind events in a cross-environment way
+    if (typeof ws.addEventListener === 'function') {
+        // Browser / ws with addEventListener
+        ws.addEventListener('open', onOpen);
+        ws.addEventListener('message', onMessage);
+        ws.addEventListener('error', onError);
+        ws.addEventListener('close', onClose);
+    } else if (typeof ws.on === 'function') {
+        // Node 'ws' EventEmitter
+        ws.on('open', onOpen);
+        ws.on('message', (data) => onMessage(data));
+        ws.on('error', onError);
+        ws.on('close', onClose);
+    } else {
+        // last-resort (some environments)
+        ws.onopen = onOpen;
+        ws.onmessage = onMessage;
+        ws.onerror = onError;
+        ws.onclose = onClose;
+    }
 };
 
 // === Epoch-based Candle Logic ===
@@ -146,10 +192,22 @@ const getCandleDirection = (open, close) => {
 };
 
 // === Trade Management ===
+// ------- enterTrade: use duration + duration_unit (more reliable) -------
 const enterTrade = (type) => {
     TRADING_STATE.entryTime = Math.floor(Date.now() / 1000);
-    TRADING_STATE.expiryTime = TRADING_STATE.entryTime + CONFIG.CONTRACT_DURATION;
     TRADING_STATE.currentTradeType = type;
+
+    // Choose sensible duration unit: if CONTRACT_DURATION is multiple of 60 -> minutes
+    let duration, duration_unit;
+    if (CONFIG.CONTRACT_DURATION % 60 === 0) {
+        duration = CONFIG.CONTRACT_DURATION / 60;
+        duration_unit = 'm';
+    } else {
+        duration = CONFIG.CONTRACT_DURATION;
+        duration_unit = 's';
+    }
+
+    console.log(`➡️ Sending proposal (${type}) duration=${duration}${duration_unit} stake=${TRADING_STATE.stake}`);
 
     safeSend({
         proposal: 1,
@@ -158,7 +216,8 @@ const enterTrade = (type) => {
         contract_type: type,
         currency: 'USD',
         symbol: TRADING_STATE.symbol,
-        date_expiry: TRADING_STATE.expiryTime
+        duration,
+        duration_unit
     });
 };
 
@@ -284,10 +343,27 @@ const handleWsOpen = () => {
     safeSend({ authorize: TRADING_STATE.token });
 };
 
+// ------- Better handleWsMessage (more debug, robust parsing) -------
 const handleWsMessage = (msg) => {
-    const data = JSON.parse(msg.data);
+    // msg may be {data: string} (browser) or raw string (node)
+    const raw = msg && msg.data !== undefined ? msg.data : msg;
+    let data;
+    try {
+        data = typeof raw === 'string' ? JSON.parse(raw) : raw;
+    } catch (err) {
+        console.error('⚠️ Failed to parse WS message:', raw, err);
+        return;
+    }
+
+    // Log important messages (you can reduce verbosity later)
+    if (data.msg_type && data.msg_type !== 'tick') {
+        console.log('◀ Received:', data.msg_type, data);
+    } else if (!data.msg_type) {
+        console.log('◀ Received (no msg_type):', data);
+    }
+
     if (data.error) {
-        console.error('❌ API Error:', data.error.message);
+        console.error('❌ API Error:', data.error);
         return;
     }
 
@@ -296,15 +372,14 @@ const handleWsMessage = (msg) => {
             console.log('✅ Authorized');
             requestHistoricalTicks();
             break;
-            
+
         case 'history':
             processHistoricalTicks(data.history.prices.map((quote, i) => ({
                 quote,
                 epoch: data.history.times[i]
             })));
             safeSend({ ticks: TRADING_STATE.symbol, subscribe: 1 });
-            
-            // Resubscribe to active contract if exists
+
             if (TRADING_STATE.activeContractId) {
                 safeSend({
                     proposal_open_contract: 1,
@@ -313,42 +388,56 @@ const handleWsMessage = (msg) => {
                 });
             }
             break;
-            
+
         case 'tick':
             processTickData(data);
             break;
-            
+
         case 'proposal':
+            // Detailed debug
+            console.log('◀ proposal payload:', data.proposal);
             if (!TRADING_STATE.isTradeDone) {
-                TRADING_STATE.proposalId = data.proposal.id;
-                TRADING_STATE.proposalPrice = parseFloat(data.proposal.spot);
+                // accept multiple possible id keys (robust)
+                TRADING_STATE.proposalId = data.proposal.id ?? data.proposal.proposal_id ?? data.proposal.proposal?.id;
+                TRADING_STATE.proposalPrice = parseFloat(data.proposal.spot ?? data.proposal.spot_price ?? data.proposal.ask_price ?? NaN);
+
+                if (!TRADING_STATE.proposalId) {
+                    console.warn('⚠️ proposal returned with no id:', data.proposal);
+                    break;
+                }
+
+                console.log(`🔔 Buying proposal id=${TRADING_STATE.proposalId} price(stake)=${TRADING_STATE.stake}`);
                 safeSend({
                     buy: TRADING_STATE.proposalId,
                     price: TRADING_STATE.stake
                 });
             }
             break;
-            
+
         case 'buy':
             TRADING_STATE.isTradeDone = true;
             TRADING_STATE.activeContractId = data.buy.contract_id;
-            console.log('✅ Trade purchased:', data.buy.contract_id);
+            console.log('✅ Trade purchased:', data.buy.contract_id, 'buy payload:', data.buy);
             safeSend({
                 proposal_open_contract: 1,
                 contract_id: data.buy.contract_id,
                 subscribe: 1
             });
             break;
-            
+
         case 'proposal_open_contract':
-            if (data.proposal_open_contract.status === 'sold') {
-                console.log('🏁 Contract settled');
+            if (data.proposal_open_contract && data.proposal_open_contract.status === 'sold') {
+                console.log('🏁 Contract settled:', data.proposal_open_contract);
                 TRADING_STATE.isTradeDone = false;
                 TRADING_STATE.hasAveragedDown = false;
                 TRADING_STATE.proposalPrice = null;
                 TRADING_STATE.currentTradeType = null;
                 TRADING_STATE.activeContractId = null;
             }
+            break;
+
+        default:
+            // optionally handle other msg types
             break;
     }
 };
@@ -357,13 +446,14 @@ const handleWsMessage = (msg) => {
 console.log('🚀 Starting trading bot...');
 initWebSocket();
 
-// Cross-platform cleanup handler
+// ------- cleanup: check numeric states directly -------
 const cleanup = () => {
-    if (ws && [ws.OPEN, ws.CONNECTING].includes(ws.readyState)) {
-        ws.close();
+    if (ws && (ws.readyState === WS_STATES.OPEN || ws.readyState === WS_STATES.CONNECTING)) {
+        try { ws.close(); } catch (e) { /* ignore */ }
     }
 };
 
+// Cross-platform cleanup handler
 if (typeof window !== 'undefined') {
     window.addEventListener('beforeunload', cleanup);
 } else if (typeof process !== 'undefined') {
