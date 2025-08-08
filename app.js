@@ -14,7 +14,6 @@ fastify.register(require('@fastify/static'), {
 const users = new Map();              // Map<token, { token, subscribedAt }>
 const runningTrades = new Set();      // Set<token>
 const tradeProcesses = new Map();     // Map<token, child_process>
-const engineProcesses = new Map();    // Map<token, child_process>
 const serverStartTime = Date.now();
 
 // Serve index.html on root
@@ -40,12 +39,10 @@ fastify.post('/unsubscribe', async (req, reply) => {
   runningTrades.delete(token);
 
   const tradeProc = tradeProcesses.get(token);
-  if (tradeProc) tradeProc.kill('SIGKILL');
+  if (tradeProc) {
+    try { tradeProc.kill('SIGKILL'); } catch {}
+  }
   tradeProcesses.delete(token);
-
-  const engineProc = engineProcesses.get(token);
-  if (engineProc) engineProc.kill('SIGKILL');
-  engineProcesses.delete(token);
 
   console.log("❌ Deleted token:", token);
   return reply.send({ success: true, message: 'Unsubscribed successfully' });
@@ -58,64 +55,59 @@ fastify.post('/check', async (req, reply) => {
   return reply.send({ subscribed: users.has(token) });
 });
 
-// Trade endpoint
+// Trade endpoint with check/start logic
 fastify.get('/trade', async (req, reply) => {
-  const activeUsers = Array.from(users.entries()).filter(
-    ([token]) => !runningTrades.has(token)
-  );
+  const report = [];
 
-  if (activeUsers.length === 0) {
-    console.log("⚠️ No available users to trade.");
-    return reply.send({ message: 'No available users to trade.' });
-  }
+  for (const [token] of users.entries()) {
+    const existingProc = tradeProcesses.get(token);
+    if (existingProc && !existingProc.killed) {
+      report.push({ token, status: 'Trading Continues' });
+      continue;
+    }
 
-  let prediction;
-  try {
-    const res = await fetch('https://pytorch-engine.onrender.com/predict');
-    prediction = JSON.stringify((await res.text()).trim());
-    console.log("📈 Prediction fetched:", prediction);
-  } catch (err) {
-    return reply.code(500).send({ error: 'Prediction fetch failed', details: err.message });
-  }
+    let prediction;
+    try {
+      const res = await fetch('https://pytorch-engine.onrender.com/predict');
+      prediction = JSON.stringify((await res.text()).trim());
+      console.log(`📈 Prediction for ${token}:`, prediction);
+    } catch (err) {
+      report.push({ token, error: 'Prediction fetch failed', details: err.message });
+      continue;
+    }
 
-  const promises = activeUsers.map(([token]) => {
-    runningTrades.add(token);
-    const cmd = `node trade.js ${token} ${prediction}`;
-    console.log(`🚀 Launching trade for ${token}: ${cmd}`);
-
-    return new Promise((resolve) => {
+    try {
+      runningTrades.add(token);
+      const cmd = `node trade.js ${token} ${prediction}`;
+      console.log(`🚀 Starting trade for ${token}: ${cmd}`);
       const process = exec(cmd);
+
       tradeProcesses.set(token, process);
 
-      process.stdout.on('data', (data) => {
-        console.log(`📤 ${token} STDOUT: ${data.trim()}`);
-      });
+      process.stdout.on('data', data => console.log(`📤 ${token} STDOUT: ${data.trim()}`));
+      process.stderr.on('data', data => console.error(`🛑 ${token} STDERR: ${data.trim()}`));
 
-      process.stderr.on('data', (data) => {
-        console.error(`🛑 ${token} STDERR: ${data.trim()}`);
-      });
-
-      process.on('close', (code) => {
+      process.on('close', code => {
         runningTrades.delete(token);
         tradeProcesses.delete(token);
-        if (code === 0) {
-          resolve({ token, result: `Trade completed successfully` });
-        } else {
-          resolve({ token, error: `Trade exited with code ${code}` });
-        }
+        console.log(`✅ Trade for ${token} exited with code ${code}`);
       });
 
-      process.on('error', (err) => {
+      process.on('error', err => {
         runningTrades.delete(token);
         tradeProcesses.delete(token);
-        console.error(`❌ ${token} ERROR: ${err.message}`);
-        resolve({ token, error: err.message });
+        console.error(`❌ Trade for ${token} ERROR: ${err.message}`);
       });
-    });
-  });
 
-  const results = await Promise.all(promises);
-  return reply.send(results);
+      report.push({ token, status: 'Trading has started' });
+    } catch (err) {
+      runningTrades.delete(token);
+      tradeProcesses.delete(token);
+      report.push({ token, error: err.message });
+    }
+  }
+
+  return reply.send(report);
 });
 
 // Cancel all running trades
@@ -140,57 +132,11 @@ fastify.get('/cancel', async (req, reply) => {
   });
 });
 
-// Run engine2.js for all users if not running
-fastify.get('/engine', async (req, reply) => {
-  const report = [];
-
-  const tasks = Array.from(users.keys()).map((token) => {
-    return new Promise((resolve) => {
-      const existing = engineProcesses.get(token);
-      if (existing && !existing.killed) {
-        report.push({ token, status: 'already running' });
-        return resolve();
-      }
-
-      const cmd = `node engine2.js ${token}`;
-      console.log(`⚙️ Running engine for ${token}: ${cmd}`);
-      const proc = exec(cmd);
-
-      engineProcesses.set(token, proc);
-
-      proc.stdout.on('data', (data) => {
-        console.log(`⚙️ ${token} ENGINE STDOUT: ${data.trim()}`);
-      });
-
-      proc.stderr.on('data', (data) => {
-        console.error(`⚠️ ${token} ENGINE STDERR: ${data.trim()}`);
-      });
-
-      proc.on('close', (code) => {
-        engineProcesses.delete(token);
-        console.log(`✅ ${token} ENGINE exited with code ${code}`);
-      });
-
-      proc.on('error', (err) => {
-        engineProcesses.delete(token);
-        console.error(`❌ ${token} ENGINE ERROR: ${err.message}`);
-      });
-
-      report.push({ token, status: 'started' });
-      resolve();
-    });
-  });
-
-  await Promise.all(tasks);
-  return reply.send({ report });
-});
-
 // Stats endpoint
 fastify.get('/stat', async (req, reply) => {
   return reply.send({
     totalSubscribers: users.size,
     runningTrades: [...runningTrades],
-    runningEngines: [...engineProcesses.keys()],
     currentTime: new Date().toISOString(),
     startTime: new Date(serverStartTime).toISOString(),
     uptime: Math.floor((Date.now() - serverStartTime) / 1000)
