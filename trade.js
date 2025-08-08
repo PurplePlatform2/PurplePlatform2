@@ -8,12 +8,14 @@ const CONFIG = {
     MAX_CANDLE_HISTORY: 5,
     MAX_PATTERN_HISTORY: 5,
     PUT_PATTERNS: ['GGGRR', 'GGGR'],
-    CALL_PATTERNS: ['RRGGG', 'RRRG']
+    CALL_PATTERNS: ['RRGGG', 'RRRG'],
+    MAX_RETRY_ATTEMPTS: 5,
+    RETRY_BASE_DELAY: 3000
 };
 
 // === Trading State ===
 const TRADING_STATE = {
-    token: process.argv[3]|| 'JklMzewtX7Da9mT', // 🔐 Replace with real token
+    token: typeof process !== 'undefined' ? process.argv[3] || 'JklMzewtX7Da9mT' : 'JklMzewtX7Da9mT',
     stake: 0.35,
     symbol: 'stpRNG',
     proposalId: null,
@@ -27,20 +29,85 @@ const TRADING_STATE = {
     currentCandle: [],
     lastCandles: [],
     patternHistory: [],
-    hasTradedThisCandle: false // ✅ Only one new trade per candle
+    hasTradedThisCandle: false,
+    activeContractId: null,
+    reconnectAttempts: 0
 };
 
 // === WebSocket Setup ===
 let ws = null;
+let isConnected = false;
+const messageQueue = [];
+
+// Get WebSocket class based on environment
+const getWebSocketClass = () => {
+    if (typeof WebSocket !== 'undefined') return WebSocket;
+    if (typeof global !== 'undefined' && global.WebSocket) return global.WebSocket;
+    return require('ws');
+};
+
+const safeSend = (data) => {
+    try {
+        if (ws && ws.readyState === ws.OPEN) {
+            ws.send(JSON.stringify(data));
+            return true;
+        }
+        messageQueue.push(data);
+        return false;
+    } catch (error) {
+        console.error('⚠️ Send error:', error);
+        return false;
+    }
+};
+
+const flushQueue = () => {
+    while (messageQueue.length > 0 && ws && ws.readyState === ws.OPEN) {
+        const msg = messageQueue.shift();
+        ws.send(JSON.stringify(msg));
+    }
+};
+
+const reconnectWithBackoff = () => {
+    if (TRADING_STATE.reconnectAttempts >= CONFIG.MAX_RETRY_ATTEMPTS) {
+        console.error('❌ Max reconnection attempts reached');
+        return;
+    }
+
+    const delay = CONFIG.RETRY_BASE_DELAY * Math.pow(2, TRADING_STATE.reconnectAttempts);
+    TRADING_STATE.reconnectAttempts++;
+    
+    console.log(`⏳ Reconnecting in ${Math.round(delay/1000)}s (Attempt ${TRADING_STATE.reconnectAttempts})`);
+    setTimeout(initWebSocket, delay);
+};
 
 const initWebSocket = () => {
-   ws = new (require('ws'))(CONFIG.WS_URL);
-    ws.onopen = handleWsOpen;
-    ws.onmessage = handleWsMessage;
-    ws.onerror = (e) => console.error('⚠️ WebSocket error:', e);
+    const WebSocketClass = getWebSocketClass();
+    ws = new WebSocketClass(CONFIG.WS_URL);
+
+    ws.onopen = () => {
+        isConnected = true;
+        TRADING_STATE.reconnectAttempts = 0;
+        console.log('🔌 WebSocket connected');
+        flushQueue();
+        handleWsOpen();
+    };
+
+    ws.onmessage = (msg) => {
+        try {
+            handleWsMessage(msg);
+        } catch (error) {
+            console.error('⚠️ Message handling error:', error);
+        }
+    };
+
+    ws.onerror = (error) => {
+        console.error('⚠️ WebSocket error:', error.message || error);
+    };
+
     ws.onclose = () => {
-        console.warn('🔌 WebSocket closed. Reconnecting...');
-        setTimeout(initWebSocket, 3000);
+        isConnected = false;
+        console.warn('🔌 WebSocket disconnected');
+        reconnectWithBackoff();
     };
 };
 
@@ -48,7 +115,7 @@ const initWebSocket = () => {
 const startNewCandle = (epoch) => {
     TRADING_STATE.candleStartTime = epoch;
     TRADING_STATE.currentCandle = [];
-    TRADING_STATE.hasTradedThisCandle = false; // ✅ Reset trade flag on new candle
+    TRADING_STATE.hasTradedThisCandle = false;
 };
 
 const finalizeCandle = () => {
@@ -59,14 +126,16 @@ const finalizeCandle = () => {
     const close = candleTicks[candleTicks.length - 1];
     const direction = getCandleDirection(open, close);
 
-    const candle = { open, close, direction };
-    TRADING_STATE.lastCandles.push(candle);
+    TRADING_STATE.lastCandles.push({ open, close, direction });
     TRADING_STATE.patternHistory.push(direction);
 
-    if (TRADING_STATE.lastCandles.length > CONFIG.MAX_CANDLE_HISTORY)
+    // Maintain history limits
+    if (TRADING_STATE.lastCandles.length > CONFIG.MAX_CANDLE_HISTORY) {
         TRADING_STATE.lastCandles.shift();
-    if (TRADING_STATE.patternHistory.length > CONFIG.MAX_PATTERN_HISTORY)
+    }
+    if (TRADING_STATE.patternHistory.length > CONFIG.MAX_PATTERN_HISTORY) {
         TRADING_STATE.patternHistory.shift();
+    }
 
     checkTradingPatterns();
 };
@@ -82,7 +151,7 @@ const enterTrade = (type) => {
     TRADING_STATE.expiryTime = TRADING_STATE.entryTime + CONFIG.CONTRACT_DURATION;
     TRADING_STATE.currentTradeType = type;
 
-    ws.send(JSON.stringify({
+    safeSend({
         proposal: 1,
         amount: TRADING_STATE.stake,
         basis: 'stake',
@@ -90,18 +159,22 @@ const enterTrade = (type) => {
         currency: 'USD',
         symbol: TRADING_STATE.symbol,
         date_expiry: TRADING_STATE.expiryTime
-    }));
+    });
 };
 
 const checkAveragingDown = (price) => {
-    if (!TRADING_STATE.proposalPrice || TRADING_STATE.hasAveragedDown || !TRADING_STATE.isTradeDone) return;
+    if (!TRADING_STATE.proposalPrice || 
+        TRADING_STATE.hasAveragedDown || 
+        !TRADING_STATE.isTradeDone) return;
 
     const entry = TRADING_STATE.proposalPrice;
     const type = TRADING_STATE.currentTradeType;
+    const threshold = CONFIG.AVERAGE_DOWN_THRESHOLD;
 
-    const shouldAverageDown =
-        (type === 'CALL' && price <= entry - CONFIG.AVERAGE_DOWN_THRESHOLD) ||
-        (type === 'PUT' && price >= entry + CONFIG.AVERAGE_DOWN_THRESHOLD);
+    const shouldAverageDown = (
+        (type === 'CALL' && price <= entry - threshold) ||
+        (type === 'PUT' && price >= entry + threshold)
+    );
 
     if (shouldAverageDown) {
         console.log(`🔁 Averaging down ${type}: Price moved against entry`);
@@ -113,7 +186,8 @@ const checkAveragingDown = (price) => {
 
 // === Pattern Matching ===
 const checkTradingPatterns = () => {
-    if (TRADING_STATE.hasTradedThisCandle) return;
+    if (TRADING_STATE.hasTradedThisCandle || 
+        TRADING_STATE.patternHistory.length < 3) return;
 
     const patternStr = TRADING_STATE.patternHistory.join('');
     const lastPattern = patternStr.slice(-5);
@@ -136,7 +210,6 @@ const checkTradingPatterns = () => {
 const processTickData = (tickData) => {
     const quote = parseFloat(tickData.tick.quote);
     const epoch = tickData.tick.epoch;
-
     const expectedStart = Math.floor(epoch / CONFIG.CANDLE_DURATION_SEC) * CONFIG.CANDLE_DURATION_SEC;
 
     if (!TRADING_STATE.candleStartTime) {
@@ -155,44 +228,52 @@ const processTickData = (tickData) => {
 // === Historical Initialization ===
 const requestHistoricalTicks = () => {
     const count = CONFIG.CANDLE_TICK_COUNT * CONFIG.MAX_CANDLE_HISTORY;
-    ws.send(JSON.stringify({
+    safeSend({
         ticks_history: TRADING_STATE.symbol,
         style: 'ticks',
         count,
         end: 'latest'
-    }));
+    });
 };
 
 const processHistoricalTicks = (history) => {
+    if (!history || history.length === 0) return;
+    
     const candles = [];
     let bucket = [];
     let bucketStart = Math.floor(history[0].epoch / CONFIG.CANDLE_DURATION_SEC) * CONFIG.CANDLE_DURATION_SEC;
 
-    for (let tick of history) {
+    history.forEach(tick => {
         const tickTime = Math.floor(tick.epoch / CONFIG.CANDLE_DURATION_SEC) * CONFIG.CANDLE_DURATION_SEC;
-
+        
         if (tickTime !== bucketStart) {
             if (bucket.length > 0) {
+                const open = bucket[0].quote;
+                const close = bucket[bucket.length - 1].quote;
                 candles.push({
-                    open: bucket[0].quote,
-                    close: bucket[bucket.length - 1].quote,
-                    direction: getCandleDirection(bucket[0].quote, bucket[bucket.length - 1].quote)
+                    open,
+                    close,
+                    direction: getCandleDirection(open, close)
                 });
                 bucket = [];
             }
             bucketStart = tickTime;
         }
         bucket.push(tick);
-    }
+    });
 
+    // Process final bucket
     if (bucket.length > 0) {
+        const open = bucket[0].quote;
+        const close = bucket[bucket.length - 1].quote;
         candles.push({
-            open: bucket[0].quote,
-            close: bucket[bucket.length - 1].quote,
-            direction: getCandleDirection(bucket[0].quote, bucket[bucket.length - 1].quote)
+            open,
+            close,
+            direction: getCandleDirection(open, close)
         });
     }
 
+    // Maintain state
     TRADING_STATE.lastCandles = candles.slice(-CONFIG.MAX_CANDLE_HISTORY);
     TRADING_STATE.patternHistory = TRADING_STATE.lastCandles.map(c => c.direction);
     console.log('📊 Initialized with historical candles:', TRADING_STATE.patternHistory.join(''));
@@ -200,74 +281,92 @@ const processHistoricalTicks = (history) => {
 
 // === WebSocket Handlers ===
 const handleWsOpen = () => {
-    console.log('🔌 Connected to WebSocket');
-    ws.send(JSON.stringify({ authorize: TRADING_STATE.token }));
+    safeSend({ authorize: TRADING_STATE.token });
 };
 
 const handleWsMessage = (msg) => {
-    try {
-        const data = JSON.parse(msg.data);
-        if (data.error) return console.error('❌ API Error:', data.error.message);
+    const data = JSON.parse(msg.data);
+    if (data.error) {
+        console.error('❌ API Error:', data.error.message);
+        return;
+    }
 
-        switch (data.msg_type) {
-            case 'authorize':
-                console.log('✅ Authorized');
-                requestHistoricalTicks();
-                break;
-
-            case 'history':
-                processHistoricalTicks(data.history.prices.map((quote, i) => ({
-                    quote,
-                    epoch: data.history.times[i]
-                })));
-                ws.send(JSON.stringify({ ticks: TRADING_STATE.symbol, subscribe: 1 }));
-                break;
-
-            case 'tick':
-                processTickData(data);
-                break;
-
-            case 'proposal':
-                if (!TRADING_STATE.isTradeDone) {
-                    TRADING_STATE.proposalId = data.proposal.id;
-                    TRADING_STATE.proposalPrice = parseFloat(data.proposal.spot);
-                    ws.send(JSON.stringify({
-                        buy: TRADING_STATE.proposalId,
-                        price: TRADING_STATE.stake
-                    }));
-                }
-                break;
-
-            case 'buy':
-                TRADING_STATE.isTradeDone = true;
-                console.log('✅ Trade purchased:', data.buy.contract_id);
-                ws.send(JSON.stringify({
+    switch (data.msg_type) {
+        case 'authorize':
+            console.log('✅ Authorized');
+            requestHistoricalTicks();
+            break;
+            
+        case 'history':
+            processHistoricalTicks(data.history.prices.map((quote, i) => ({
+                quote,
+                epoch: data.history.times[i]
+            })));
+            safeSend({ ticks: TRADING_STATE.symbol, subscribe: 1 });
+            
+            // Resubscribe to active contract if exists
+            if (TRADING_STATE.activeContractId) {
+                safeSend({
                     proposal_open_contract: 1,
-                    contract_id: data.buy.contract_id,
+                    contract_id: TRADING_STATE.activeContractId,
                     subscribe: 1
-                }));
-                break;
-
-            case 'proposal_open_contract':
-                if (data.proposal_open_contract.status === 'sold') {
-                    console.log('🏁 Contract settled. Resetting...');
-                    TRADING_STATE.isTradeDone = false;
-                    TRADING_STATE.hasAveragedDown = false;
-                    TRADING_STATE.proposalPrice = null;
-                    TRADING_STATE.currentTradeType = null;
-                }
-                break;
-        }
-    } catch (err) {
-        console.error('⚠️ Message parse error:', err);
+                });
+            }
+            break;
+            
+        case 'tick':
+            processTickData(data);
+            break;
+            
+        case 'proposal':
+            if (!TRADING_STATE.isTradeDone) {
+                TRADING_STATE.proposalId = data.proposal.id;
+                TRADING_STATE.proposalPrice = parseFloat(data.proposal.spot);
+                safeSend({
+                    buy: TRADING_STATE.proposalId,
+                    price: TRADING_STATE.stake
+                });
+            }
+            break;
+            
+        case 'buy':
+            TRADING_STATE.isTradeDone = true;
+            TRADING_STATE.activeContractId = data.buy.contract_id;
+            console.log('✅ Trade purchased:', data.buy.contract_id);
+            safeSend({
+                proposal_open_contract: 1,
+                contract_id: data.buy.contract_id,
+                subscribe: 1
+            });
+            break;
+            
+        case 'proposal_open_contract':
+            if (data.proposal_open_contract.status === 'sold') {
+                console.log('🏁 Contract settled');
+                TRADING_STATE.isTradeDone = false;
+                TRADING_STATE.hasAveragedDown = false;
+                TRADING_STATE.proposalPrice = null;
+                TRADING_STATE.currentTradeType = null;
+                TRADING_STATE.activeContractId = null;
+            }
+            break;
     }
 };
 
-// === Startup ===
+// === Startup & Cleanup ===
 console.log('🚀 Starting trading bot...');
 initWebSocket();
 
-(typeof window !== 'undefined'
-    ? () => window.addEventListener('beforeunload', () => ws?.readyState === WebSocket.OPEN && ws.close())
-    : () => process.on('SIGINT', () => { ws?.readyState === ws.OPEN && ws.close(); process.exit(); })
-)();
+// Cross-platform cleanup handler
+const cleanup = () => {
+    if (ws && [ws.OPEN, ws.CONNECTING].includes(ws.readyState)) {
+        ws.close();
+    }
+};
+
+if (typeof window !== 'undefined') {
+    window.addEventListener('beforeunload', cleanup);
+} else if (typeof process !== 'undefined') {
+    process.on('SIGINT', cleanup);
+    process.on('SIGTERM', cleanup);
+}
