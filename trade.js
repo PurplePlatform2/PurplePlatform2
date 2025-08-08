@@ -1,6 +1,6 @@
 // === Configuration Constants ===
 const CONFIG = {
-    WS_URL: 'wss://ws.derivws.com/websockets/v3?app_id=1089',
+    WS_URL: 'wss://ws.derivws.com/websockets/v3?app_id=85077',
     CANDLE_TICK_COUNT: 60,
     CANDLE_DURATION_SEC: 60,
     AVERAGE_DOWN_THRESHOLD: 0.2,
