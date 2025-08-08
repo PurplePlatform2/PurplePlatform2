@@ -34,7 +34,7 @@ const TRADING_STATE = {
 let ws = null;
 
 const initWebSocket = () => {
-   ws = new (require('ws')) WebSocket(CONFIG.WS_URL);
+   ws = new (require('ws'))(CONFIG.WS_URL);
     ws.onopen = handleWsOpen;
     ws.onmessage = handleWsMessage;
     ws.onerror = (e) => console.error('⚠️ WebSocket error:', e);
