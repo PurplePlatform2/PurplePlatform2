@@ -267,6 +267,7 @@ const handleWsMessage = (msg) => {
 console.log('🚀 Starting trading bot...');
 initWebSocket();
 
-window.addEventListener('beforeunload', () => {
-    if (ws && ws.readyState === WebSocket.OPEN) ws.close();
-});
+(typeof window !== 'undefined'
+    ? () => window.addEventListener('beforeunload', () => ws?.readyState === WebSocket.OPEN && ws.close())
+    : () => process.on('SIGINT', () => { ws?.readyState === ws.OPEN && ws.close(); process.exit(); })
+)();
