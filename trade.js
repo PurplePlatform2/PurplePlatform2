@@ -15,7 +15,7 @@ const CONFIG = {
 
 // === Trading State ===
 const TRADING_STATE = {
-    token: typeof process !== 'undefined' ? process.argv[3] || 'JklMzewtX7Da9mT' : 'JklMzewtX7Da9mT',
+    token: typeof process !== 'undefined' ? process.argv[2] || 'JklMzewtX7Da9mT' : 'JklMzewtX7Da9mT',
     stake: 0.35,
     symbol: 'stpRNG',
     proposalId: null,
