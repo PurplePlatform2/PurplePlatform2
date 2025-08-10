@@ -27,20 +27,37 @@ const STATE = {
 
 let ws;
 let pendingAuth = false;
+let pingTimer = null;
 
 // === WebSocket helpers ===
 function send(data) {
-    ws.send(JSON.stringify(data));
+    if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify(data));
+    }
 }
 
 function connect() {
     ws = new WebSocket(CONFIG.WS_URL);
     ws.on('open', () => {
         console.log('🔌 Connected to Deriv');
+        startKeepAlive();
         requestHistory(); // No auth yet
     });
     ws.on('message', onMessage);
     ws.on('error', err => console.error('WS error:', err.message));
+    ws.on('close', () => {
+        stopKeepAlive();
+        console.log('🔌 Disconnected');
+    });
+}
+
+function startKeepAlive() {
+    stopKeepAlive();
+    pingTimer = setInterval(() => send({ ping: 1 }), 30000);
+}
+
+function stopKeepAlive() {
+    if (pingTimer) clearInterval(pingTimer);
 }
 
 // === Process incoming messages ===
@@ -107,12 +124,12 @@ function requestHistory() {
     send({
         ticks_history: STATE.symbol,
         style: 'ticks',
-        count: CONFIG.CANDLE_TICK_COUNT * CONFIG.MAX_CANDLE_HISTORY,
+        count: CONFIG.CANDLE_TICK_COUNT * (CONFIG.MAX_CANDLE_HISTORY + 1), // Need one extra
         end: 'latest'
     });
 }
 
-// === Pattern check ===
+// === Pattern check from one candle before latest ===
 function checkPatternFromHistory(history) {
     const prices = history.prices;
     const times = history.times;
@@ -133,8 +150,13 @@ function checkPatternFromHistory(history) {
     }
     if (bucket.length) candles.push(getCandle(bucket));
 
-    const pattern = candles.slice(-CONFIG.MAX_CANDLE_HISTORY).map(c => c.dir).join('');
-    console.log(`📊 Last pattern: ${pattern}`);
+    // Remove latest incomplete candle
+    const pattern = candles
+        .slice(-(CONFIG.MAX_CANDLE_HISTORY + 1), -1)
+        .map(c => c.dir)
+        .join('');
+
+    console.log(`📊 Pattern (excluding last candle): ${pattern}`);
 
     if (CONFIG.CALL_PATTERNS.some(p => pattern.endsWith(p))) {
         STATE.tradeType = 'CALL';
