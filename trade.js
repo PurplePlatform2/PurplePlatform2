@@ -1,5 +1,5 @@
-// === Single-shot Pattern Bot (Auth only if trade needed) ===
-// Author: Sanne Karibo
+//------------------------------------------------------------
+// Author: Sanne Karibo (modified for fixed-point averaging down + expiry exit)
 // ----------------------------------------------------------------
 
 const WebSocket = require('ws');
@@ -8,7 +8,7 @@ const CONFIG = {
     WS_URL: 'wss://ws.derivws.com/websockets/v3?app_id=85077',
     CANDLE_TICK_COUNT: 60,
     CANDLE_DURATION_SEC: 60,
-    AVERAGE_DOWN_PERCENT: 0.2, // 0.2% drop
+    AVERAGE_DOWN_POINTS: 0.2, // fixed 0.2 point diff
     CONTRACT_DURATION: 60,
     MAX_CANDLE_HISTORY: 5,
     PUT_PATTERNS: ['GGGRR', 'GGGR'],
@@ -23,7 +23,8 @@ const STATE = {
     tradeType: null,
     hasAveragedDown: false,
     activeContractId: null,
-    isWatchingPrice: false
+    isWatchingPrice: false,
+    expiryTime: null
 };
 
 let ws;
@@ -64,14 +65,12 @@ function stopKeepAlive() {
 // === Process incoming messages ===
 function onMessage(raw) {
     let data;
-    try { data = JSON.parse(raw); } catch (e) { return; }
+    try { data = JSON.parse(raw); } catch { return; }
 
     if (data.error) {
         console.error('❌ API Error:', data.error.message);
         process.exit(1);
     }
-
-    console.log(`📥 Received: ${data.msg_type}`);
 
     switch (data.msg_type) {
         case 'history':
@@ -90,7 +89,6 @@ function onMessage(raw) {
             break;
 
         case 'proposal':
-            // We no longer set entry price here — we wait for open contract data
             send({ buy: data.proposal.id, price: STATE.stake });
             break;
 
@@ -111,12 +109,18 @@ function onMessage(raw) {
                     STATE.isWatchingPrice = true;
                     send({ ticks: STATE.symbol, subscribe: 1 });
                 }
+                if (!STATE.expiryTime && data.proposal_open_contract.date_expiry) {
+                    STATE.expiryTime = parseInt(data.proposal_open_contract.date_expiry) * 1000;
+                    console.log(`⏳ Contract expiry set: ${new Date(STATE.expiryTime).toLocaleTimeString()}`);
+                }
+                checkExpiry();
             }
             break;
 
         case 'tick':
             if (STATE.isWatchingPrice) {
                 checkAveragingDown(parseFloat(data.tick.quote));
+                checkExpiry();
             }
             break;
 
@@ -132,7 +136,7 @@ function requestHistory() {
     send({
         ticks_history: STATE.symbol,
         style: 'ticks',
-        count: CONFIG.CANDLE_TICK_COUNT * (CONFIG.MAX_CANDLE_HISTORY + 1), // Need one extra
+        count: CONFIG.CANDLE_TICK_COUNT * (CONFIG.MAX_CANDLE_HISTORY + 1),
         end: 'latest'
     });
 }
@@ -158,7 +162,6 @@ function checkPatternFromHistory(history) {
     }
     if (bucket.length) candles.push(getCandle(bucket));
 
-    // Remove latest incomplete candle
     const pattern = candles
         .slice(-(CONFIG.MAX_CANDLE_HISTORY + 1), -1)
         .map(c => c.dir)
@@ -199,20 +202,26 @@ function enterTrade(type) {
     });
 }
 
-// === Averaging down check ===
+// === Averaging down check (fixed points) ===
 function checkAveragingDown(price) {
     if (!STATE.entryPrice || STATE.hasAveragedDown) return;
 
-    const threshold = STATE.entryPrice * (CONFIG.AVERAGE_DOWN_PERCENT / 100);
+    const thresholdPoints = CONFIG.AVERAGE_DOWN_POINTS;
 
-    if ((STATE.tradeType === 'CALL' && price <= STATE.entryPrice - threshold) ||
-        (STATE.tradeType === 'PUT' && price >= STATE.entryPrice + threshold)) {
-        
-        console.log(`🔁 Averaging down ${STATE.tradeType} at ${price} (entry was ${STATE.entryPrice}, threshold ${threshold})`);
+    if ((STATE.tradeType === 'CALL' && price <= STATE.entryPrice - thresholdPoints) ||
+        (STATE.tradeType === 'PUT' && price >= STATE.entryPrice + thresholdPoints)) {
+
+        console.log(`🔁 Averaging down ${STATE.tradeType} at ${price} (entry was ${STATE.entryPrice}, diff ${thresholdPoints})`);
         STATE.hasAveragedDown = true;
         enterTrade(STATE.tradeType);
-    } else {
-        console.log(`📈 Price check: ${price} | Entry: ${STATE.entryPrice} | Threshold: ${threshold}`);
+    }
+}
+
+// === Expiry check ===
+function checkExpiry() {
+    if (STATE.expiryTime && Date.now() >= STATE.expiryTime) {
+        console.log(`⌛ Contract expiry reached at ${new Date().toLocaleTimeString()}. Exiting...`);
+        process.exit(0);
     }
 }
 
