@@ -11,8 +11,8 @@ const CONFIG = {
     AVERAGE_DOWN_POINTS: 0.2, // fixed 0.2 point diff
     CONTRACT_DURATION: 60,
     MAX_CANDLE_HISTORY: 5,
-    PUT_PATTERNS: ['GGGRR', 'GGGR'],
-    CALL_PATTERNS: ['RRGGG', 'RRRG']
+    PUT_PATTERNS: ['RRRR', 'GGGR'],
+    CALL_PATTERNS: ['GGGG', 'RRRG']
 };
 
 const STATE = {
