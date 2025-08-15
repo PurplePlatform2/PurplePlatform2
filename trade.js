@@ -1,234 +1,188 @@
-//------------------------------------------------------------
-// Author: Sanne Karibo (modified for fixed-point averaging down + expiry exit)
-// ----------------------------------------------------------------
+// === CONFIG ===
+const APP_ID = 85077; // Your real Deriv App ID
+const API_TOKEN = process.argv[2] || 'YOUR_REAL_API_TOKEN_HERE'; // Your real Deriv API token
+const SYMBOL = 'R_100';
+const BASE_STAKE = 1; // Base stake amount
+const CONTRACT_DURATION = 1; // in minutes
+const MAX_MARTINGALE_LEVELS = 4;
 
-const WebSocket = require('ws');
+// === Environment Detection ===
+const isNode = (typeof process !== 'undefined') && process.release?.name === 'node';
+const WS = isNode ? require('ws') : WebSocket;
 
-const CONFIG = {
-    WS_URL: 'wss://ws.derivws.com/websockets/v3?app_id=85077',
-    CANDLE_TICK_COUNT: 60,
-    CANDLE_DURATION_SEC: 60,
-    AVERAGE_DOWN_POINTS: 0.2, // fixed 0.2 point diff
-    CONTRACT_DURATION: 60,
-    MAX_CANDLE_HISTORY: 5,
-    PUT_PATTERNS: [ 'GGGR'],
-    CALL_PATTERNS: ['RRRG']
-};
-
-const STATE = {
-    token: process.argv[2] || process.env.DERIV_TOKEN || '',
-    stake: 0.35,
-    symbol: 'stpRNG',
-    entryPrice: null,
-    tradeType: null,
-    hasAveragedDown: false,
-    activeContractId: null,
-    isWatchingPrice: false,
-    expiryTime: null
-};
-
+// === State ===
 let ws;
-let pingTimer = null;
+let lastPrice = null;
+let streakCount = 0;
+let streakDirection = null; // 'up' or 'down'
+let tradeInProgress = false;
+let lastContractId = null;
+let reverseTradePending = false;
+let currentStake = BASE_STAKE;
+let martingaleLevel = 0;
 
-// === WebSocket helpers ===
-function send(data) {
-    if (ws && ws.readyState === WebSocket.OPEN) {
-        console.log(`📤 Sending: ${JSON.stringify(data)}`);
-        ws.send(JSON.stringify(data));
-    }
-}
-
+// === Connect WebSocket ===
 function connect() {
-    ws = new WebSocket(CONFIG.WS_URL);
-    ws.on('open', () => {
-        console.log('🔌 Connected to Deriv');
-        startKeepAlive();
-        requestHistory(); // No auth yet
-    });
-    ws.on('message', onMessage);
-    ws.on('error', err => console.error('❌ WS error:', err.message));
-    ws.on('close', () => {
-        stopKeepAlive();
-        console.log('🔌 Disconnected');
-    });
+    ws = new WS(`wss://ws.derivws.com/websockets/v3?app_id=${APP_ID}`);
+
+    ws.onopen = () => {
+        console.log('✅ Connected to Deriv');
+        getInitialTicks(); // Initialize from last 8 ticks
+    };
+
+    ws.onmessage = (msg) => {
+        const data = JSON.parse(msg.data);
+        handleMessage(data);
+    };
+
+    ws.onerror = (err) => console.error('❌ WebSocket error', err);
+    ws.onclose = () => {
+        console.log('🔄 Reconnecting in 3s...');
+        setTimeout(connect, 3000);
+    };
 }
 
-function startKeepAlive() {
-    stopKeepAlive();
-    pingTimer = setInterval(() => send({ ping: 1 }), 30000);
+// === Get Last 8 Ticks from History ===
+function getInitialTicks() {
+    ws.send(JSON.stringify({
+        ticks_history: SYMBOL,
+        count: 8,
+        end: 'latest',
+        style: 'ticks'
+    }));
 }
 
-function stopKeepAlive() {
-    if (pingTimer) clearInterval(pingTimer);
+// === Subscribe to Live Ticks ===
+function subscribeTicks() {
+    ws.send(JSON.stringify({ ticks: SYMBOL }));
 }
 
-// === Process incoming messages ===
-function onMessage(raw) {
-    let data;
-    try { data = JSON.parse(raw); } catch { return; }
+// === Authorize ===
+function authorize() {
+    ws.send(JSON.stringify({ authorize: API_TOKEN }));
+}
 
-    if (data.error) {
-        console.error('❌ API Error:', data.error.message);
-        process.exit(1);
-    }
+// === Buy Contract ===
+function buyContract(contractType) {
+    console.log(`📤 Placing ${contractType} trade with stake: ${currentStake}`);
+    ws.send(JSON.stringify({
+        buy: 1,
+        price: currentStake,
+        parameters: {
+            amount: currentStake,
+            basis: 'stake',
+            contract_type: contractType,
+            currency: 'USD',
+            duration: CONTRACT_DURATION,
+            duration_unit: 'm',
+            symbol: SYMBOL
+        }
+    }));
+}
 
+// === Handle Incoming Messages ===
+function handleMessage(data) {
     switch (data.msg_type) {
         case 'history':
-            const hasPattern = checkPatternFromHistory(data.history);
-            if (!hasPattern) {
-                console.log('❌ No trade pattern found. Exiting...');
-                process.exit(0);
-            }
-            console.log(`📌 Pattern matched: ${STATE.tradeType} → Authorizing...`);
-            send({ authorize: STATE.token });
-            break;
-
-        case 'authorize':
-            console.log('✅ Authorized, entering trade...');
-            enterTrade(STATE.tradeType);
-            break;
-
-        case 'proposal':
-            send({ buy: data.proposal.id, price: STATE.stake });
-            break;
-
-        case 'buy':
-            console.log(`✅ Bought ${STATE.tradeType}. Contract ID: ${data.buy.contract_id}`);
-            STATE.activeContractId = data.buy.contract_id;
-            send({ proposal_open_contract: 1, contract_id: STATE.activeContractId, subscribe: 1 });
-            break;
-
-        case 'proposal_open_contract':
-            if (data.proposal_open_contract.status === 'sold') {
-                console.log('🏁 Contract settled. Exiting...');
-                process.exit(0);
-            } else {
-                if (!STATE.entryPrice && data.proposal_open_contract.entry_spot) {
-                    STATE.entryPrice = parseFloat(data.proposal_open_contract.entry_spot);
-                    console.log(`💰 Entry price set to ${STATE.entryPrice}`);
-                    STATE.isWatchingPrice = true;
-                    send({ ticks: STATE.symbol, subscribe: 1 });
-                }
-                if (!STATE.expiryTime && data.proposal_open_contract.date_expiry) {
-                    STATE.expiryTime = parseInt(data.proposal_open_contract.date_expiry) * 1000;
-                    console.log(`⏳ Contract expiry set: ${new Date(STATE.expiryTime).toLocaleTimeString()}`);
-                }
-                checkExpiry();
-            }
+            initFromHistory(data.history.prices);
             break;
 
         case 'tick':
-            if (STATE.isWatchingPrice) {
-                checkAveragingDown(parseFloat(data.tick.quote));
-                checkExpiry();
-            }
+            handleTick(data.tick);
             break;
 
-        case 'sell':
-            console.log(`📤 Sold for $${data.sell.sold_for}. Exiting...`);
-            process.exit(0);
+        case 'authorize':
+            console.log('🔑 Authorized');
+            placeTrade();
+            break;
+
+        case 'buy':
+            console.log(`✅ Trade opened: ${data.buy.contract_id}`);
+            lastContractId = data.buy.contract_id;
+            tradeInProgress = true;
+            subscribeToContract(lastContractId);
+            break;
+
+        case 'proposal_open_contract':
+            if (data.proposal_open_contract.is_sold) {
+                tradeInProgress = false;
+                const profit = data.proposal_open_contract.profit;
+                console.log(`📊 Trade ended. Profit: ${profit}`);
+
+                if (profit < 0) {
+                    martingaleLevel++;
+                    if (martingaleLevel > MAX_MARTINGALE_LEVELS) {
+                        console.log(`🛑 Max martingale level (${MAX_MARTINGALE_LEVELS}) reached. Stopping bot.`);
+                        process.exit(0);
+                    }
+                    console.log(`🔄 Loss detected — reversing direction and doubling stake (Level ${martingaleLevel})`);
+                    reverseTradePending = true;
+                    currentStake *= 2;
+                    authorize();
+                } else {
+                    currentStake = BASE_STAKE;
+                    martingaleLevel = 0;
+                }
+            }
             break;
     }
 }
 
-// === Request historical ticks (public) ===
-function requestHistory() {
-    send({
-        ticks_history: STATE.symbol,
-        style: 'ticks',
-        count: CONFIG.CANDLE_TICK_COUNT * (CONFIG.MAX_CANDLE_HISTORY + 1),
-        end: 'latest'
-    });
-}
+// === Initialize Streak from History ===
+function initFromHistory(prices) {
+    console.log(`📜 Initializing from last ${prices.length} ticks...`);
+    streakCount = 1;
+    streakDirection = null;
+    lastPrice = prices[0];
 
-// === Pattern check from one candle before latest ===
-function checkPatternFromHistory(history) {
-    const prices = history.prices;
-    const times = history.times;
-    let candles = [];
-    let bucket = [];
-    let bucketStart = Math.floor(times[0] / CONFIG.CANDLE_DURATION_SEC) * CONFIG.CANDLE_DURATION_SEC;
-
-    for (let i = 0; i < prices.length; i++) {
-        const tickTime = Math.floor(times[i] / CONFIG.CANDLE_DURATION_SEC) * CONFIG.CANDLE_DURATION_SEC;
-        if (tickTime !== bucketStart) {
-            if (bucket.length) {
-                candles.push(getCandle(bucket));
-                bucket = [];
-            }
-            bucketStart = tickTime;
+    for (let i = 1; i < prices.length; i++) {
+        if (prices[i] > lastPrice) {
+            if (streakDirection === 'up') streakCount++;
+            else { streakDirection = 'up'; streakCount = 1; }
+        } else if (prices[i] < lastPrice) {
+            if (streakDirection === 'down') streakCount++;
+            else { streakDirection = 'down'; streakCount = 1; }
         }
-        bucket.push(prices[i]);
+        lastPrice = prices[i];
     }
-    if (bucket.length) candles.push(getCandle(bucket));
 
-    const pattern = candles
-        .slice(-(CONFIG.MAX_CANDLE_HISTORY + 1), -1)
-        .map(c => c.dir)
-        .join('');
-
-    console.log(`📊 Pattern (excluding last candle): ${pattern}`);
-
-    if (CONFIG.CALL_PATTERNS.some(p => pattern.endsWith(p))) {
-        STATE.tradeType = 'CALL';
-        return true;
-    }
-    if (CONFIG.PUT_PATTERNS.some(p => pattern.endsWith(p))) {
-        STATE.tradeType = 'PUT';
-        return true;
-    }
-    return false;
+    console.log(`📊 Initial streak: ${streakCount} ${streakDirection}`);
+    subscribeTicks();
 }
 
-function getCandle(bucket) {
-    const open = bucket[0], close = bucket[bucket.length - 1];
-    const dir = Math.abs(close - open) < 0.0001 ? 'D' : (close > open ? 'G' : 'R');
-    return { open, close, dir };
+// === Handle Live Tick Updates ===
+function handleTick(tick) {
+    if (lastPrice !== null) {
+        if (tick.quote > lastPrice) {
+            if (streakDirection === 'up') streakCount++;
+            else { streakDirection = 'up'; streakCount = 1; }
+        } else if (tick.quote < lastPrice) {
+            if (streakDirection === 'down') streakCount++;
+            else { streakDirection = 'down'; streakCount = 1; }
+        }
+
+        if (!tradeInProgress && streakCount >= 8) {
+            console.log(`🔥 ${streakCount} ${streakDirection === 'up' ? 'Green' : 'Red'} in a row`);
+            authorize();
+        }
+    }
+    lastPrice = tick.quote;
 }
 
-// === Trade entry ===
-function enterTrade(type) {
-    let duration = CONFIG.CONTRACT_DURATION % 60 === 0 ? CONFIG.CONTRACT_DURATION / 60 : CONFIG.CONTRACT_DURATION;
-    let duration_unit = CONFIG.CONTRACT_DURATION % 60 === 0 ? 'm' : 's';
-    send({
-        proposal: 1,
-        amount: STATE.stake,
-        basis: 'stake',
-        contract_type: type,
-        currency: 'USD',
-        symbol: STATE.symbol,
-        duration,
-        duration_unit
-    });
-}
-
-// === Averaging down check (fixed points) ===
-function checkAveragingDown(price) {
-    if (!STATE.entryPrice || STATE.hasAveragedDown) return;
-
-    const thresholdPoints = CONFIG.AVERAGE_DOWN_POINTS;
-
-    if ((STATE.tradeType === 'CALL' && price <= STATE.entryPrice - thresholdPoints) ||
-        (STATE.tradeType === 'PUT' && price >= STATE.entryPrice + thresholdPoints)) {
-
-        console.log(`🔁 Averaging down ${STATE.tradeType} at ${price} (entry was ${STATE.entryPrice}, diff ${thresholdPoints})`);
-        STATE.hasAveragedDown = true;
-        enterTrade(STATE.tradeType);
+// === Place Trade ===
+function placeTrade() {
+    if (reverseTradePending) {
+        buyContract(streakDirection === 'up' ? 'PUT' : 'CALL');
+        reverseTradePending = false;
+    } else {
+        buyContract(streakDirection === 'down' ? 'CALL' : 'PUT');
     }
 }
 
-// === Expiry check ===
-function checkExpiry() {
-    if (STATE.expiryTime && Date.now() >= STATE.expiryTime) {
-        console.log(`⌛ Contract expiry reached at ${new Date().toLocaleTimeString()}. Exiting...`);
-        process.exit(0);
-    }
+// === Subscribe to Contract Updates ===
+function subscribeToContract(contractId) {
+    ws.send(JSON.stringify({ proposal_open_contract: 1, contract_id: contractId }));
 }
 
-// === Start ===
-if (!STATE.token) {
-    console.error('❌ No token provided. Pass as argument or set DERIV_TOKEN env var.');
-    process.exit(1);
-}
-console.log('🚀 Starting pattern-check bot (Sanne JS engine)...');
+// === Start Bot ===
 connect();
