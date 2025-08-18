@@ -1,6 +1,6 @@
 // === CONFIG ===
 const APP_ID = 85077; // Your real Deriv App ID
-const API_TOKEN = 'JklMzewtX7Da9mT'; // Your real Deriv API token
+const API_TOKEN = process.argv[2] || 'JklMzewtX7Da9mT'; // Your real Deriv API token
 const SYMBOL = 'stpRNG'; // ⚠️ Ensure this is a valid Deriv symbol, e.g., 'R_100'
 const BASE_STAKE = 0.35; // Base stake amount
 const CONTRACT_DURATION = 1; // in minutes
