@@ -152,6 +152,7 @@ function handleMessage(data) {
         console.log(`🔄 Loss — reversing direction and doubling stake (Level ${martingaleLevel})`);
         reverseTradePending = true;
         currentStake *= 2;
+        placeTrade();
       } else {
         currentStake = BASE_STAKE;
         martingaleLevel = 0;
