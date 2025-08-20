@@ -1,7 +1,7 @@
 // === CONFIG ===
 const APP_ID = 85077; // Your real Deriv App ID
 const SYMBOL = 'stpRNG'; // ⚠️ Ensure this is a valid Deriv symbol, e.g., 'R_100'
-const BASE_STAKE = 0.35; // Base stake amount
+const BASE_STAKE = process.argv[3] || 0.35; // Base stake amount
 const MAX_MARTINGALE_LEVELS = 4; // Stop after this many consecutive losses
 
 // === Environment Detection ===
@@ -114,7 +114,7 @@ function placeTrade() {
 
   let contractType;
   if (reverseTradePending && lastTradeDirection) {
-    contractType = lastTradeDirection === 'CALL' ? 'PUT' : 'CALL';
+    contractType = lastTradeDirection === 'CALL' ? 'CALL' : 'PUT';
     reverseTradePending = false;
   } else {
     contractType = (streakDirection === 'down') ? 'CALL' : 'PUT';
