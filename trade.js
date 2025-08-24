@@ -1,8 +1,7 @@
 // === CONFIG ===
 const APP_ID = 85077; // Your real Deriv App ID
 const SYMBOL = 'stpRNG'; // ⚠️ Ensure this is a valid Deriv symbol, e.g., 'R_100'
-const BASE_STAKE = process.argv[3] || 0.35; // Base stake amount
-const MAX_MARTINGALE_LEVELS = 4; // Stop after this many consecutive losses
+const BASE_STAKE = 0.7; // Base stake amount
 
 // === Environment Detection ===
 const isNode = (typeof process !== 'undefined') && process.release?.name === 'node';
@@ -12,7 +11,7 @@ const API_TOKEN = isNode ? process.argv[2] : 'JklMzewtX7Da9mT';
 // === State ===
 let ws;
 let stopped = false;
-let hasAuthorized=false;
+let hasAuthorized = false;
 
 let lastPrice = null;
 let streakCount = 0;
@@ -22,10 +21,6 @@ let tradeInProgress = false;
 let proposalPending = false;   
 let lastContractId = null;     
 let lastTradeDirection = null; 
-let reverseTradePending = false; 
-
-let currentStake = BASE_STAKE;
-let martingaleLevel = 0;
 
 // === Connect WebSocket ===
 function connect() {
@@ -82,11 +77,11 @@ function authorize() {
 // === Proposals ===
 function sendProposal(contractType) {
   proposalPending = true;
-  console.log(`📝 Requesting proposal for ${contractType} @ stake ${currentStake.toFixed(2)}`);
+  console.log(`📝 Requesting proposal for ${contractType} @ stake ${BASE_STAKE.toFixed(2)}`);
 
   ws.send(JSON.stringify({
     proposal: 1,
-    amount: currentStake,
+    amount: BASE_STAKE,
     basis: 'stake',
     contract_type: contractType, 
     currency: 'USD',
@@ -100,7 +95,7 @@ function buyFromProposal(proposalId) {
   console.log(`🛒 Buying contract id: ${proposalId}`);
   ws.send(JSON.stringify({
     buy: proposalId,
-    price: currentStake 
+    price: BASE_STAKE 
   }));
 }
 
@@ -112,14 +107,7 @@ function subscribeToContract(contractId) {
 function placeTrade() {
   if (stopped || tradeInProgress || proposalPending) return;
 
-  let contractType;
-  if (reverseTradePending && lastTradeDirection) {
-    contractType = lastTradeDirection === 'CALL' ? 'CALL' : 'PUT';
-    reverseTradePending = false;
-  } else {
-    contractType = (streakDirection === 'down') ? 'CALL' : 'PUT';
-  }
-
+  let contractType = (streakDirection === 'down') ? 'CALL' : 'PUT';
   lastTradeDirection = contractType;
   sendProposal(contractType);
 }
@@ -139,25 +127,7 @@ function handleMessage(data) {
       const profit = parseFloat(poc.profit);
       const result = profit >= 0 ? 'WON ✅' : 'LOST ❌';
 
-      console.log(`📊 Contract ${poc.contract_id} settled → ${result} | P/L: ${profit.toFixed(2)} | Stake: ${currentStake.toFixed(2)}`);
-
-      if (profit < 0) {
-        martingaleLevel++;
-        if (martingaleLevel > MAX_MARTINGALE_LEVELS) {
-          console.log(`🛑 Max martingale level (${MAX_MARTINGALE_LEVELS}) reached. Stopping bot.`);
-          stopped = true;
-          if (isNode) process.exit(0);
-          return;
-        }
-        console.log(`🔄 Loss — reversing direction and doubling stake (Level ${martingaleLevel})`);
-        reverseTradePending = true;
-        currentStake *= 2;
-        placeTrade();
-      } else {
-        currentStake = BASE_STAKE;
-        martingaleLevel = 0;
-        console.log('✅ Win — martingale reset. Waiting for next streak.');
-      }
+      console.log(`📊 Contract ${poc.contract_id} settled → ${result} | P/L: ${profit.toFixed(2)} | Stake: ${BASE_STAKE.toFixed(2)}`);
 
       forgetContracts(); // stop listening to closed contracts
     } else {
@@ -178,7 +148,8 @@ function handleMessage(data) {
 
     case 'authorize':
       console.log('🔑 Authorized');
-      hasAuthorized=true; placeTrade();
+      hasAuthorized = true;
+      placeTrade();
       break;
 
     case 'proposal':
@@ -197,7 +168,7 @@ function handleMessage(data) {
       }
       lastContractId = data.buy.contract_id;
       tradeInProgress = true;
-      console.log(`✅ Trade opened: ${lastContractId} | Direction: ${lastTradeDirection} | Stake: ${currentStake.toFixed(2)}`);
+      console.log(`✅ Trade opened: ${lastContractId} | Direction: ${lastTradeDirection} | Stake: ${BASE_STAKE.toFixed(2)}`);
       subscribeToContract(lastContractId);
       break;
   }
@@ -239,7 +210,7 @@ function handleTick(tick) {
 
     if (!tradeInProgress && !proposalPending && streakCount >= 8){
       console.log(`🔥 ${streakCount} ${streakDirection === 'up' ? 'Green' : 'Red'} in a row → placing trade`);
-      if(hasAuthorized)placeTrade(); else authorize();
+      if (hasAuthorized) placeTrade(); else authorize();
     }
   }
   lastPrice = tick.quote;
