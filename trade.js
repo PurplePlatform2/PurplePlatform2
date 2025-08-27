@@ -1,220 +1,143 @@
 // === CONFIG ===
-const APP_ID = 85077; // Your real Deriv App ID
-const SYMBOL = 'stpRNG'; // ⚠️ Ensure this is a valid Deriv symbol, e.g., 'R_100'
-const BASE_STAKE = 0.7; // Base stake amount
+const APP_ID = 1089; // Your Deriv app_id
+const API_TOKEN = process.argv[2] || "JklMzewtX7Da9mT"; // Your API token
+const SYMBOL = "stpRNG"; // Your market
+const GRANULARITY = 60; // 1-minute candles
+const STAKE = process.argv[3] || 0.35; // USD
+const DURATION = 60; // seconds
+const MAX_PYRAMID = 10;
+const CANDLE_COUNT = 5; // last 5 candles
 
-// === Environment Detection ===
-const isNode = (typeof process !== 'undefined') && process.release?.name === 'node';
-const WS = isNode ? require('ws') : WebSocket;
-const API_TOKEN = isNode ? process.argv[2] : 'JklMzewtX7Da9mT'; 
-
-// === State ===
-let ws;
-let stopped = false;
-let hasAuthorized = false;
-
-let lastPrice = null;
-let streakCount = 0;
-let streakDirection = null; // 'up' or 'down'
-
-let tradeInProgress = false;   
-let proposalPending = false;   
-let lastContractId = null;     
-let lastTradeDirection = null; 
-
-// === Connect WebSocket ===
-function connect() {
-  ws = new WS(`wss://ws.derivws.com/websockets/v3?app_id=${APP_ID}`);
-
-  ws.onopen = () => {
-    console.log('✅ Connected to Deriv'); 
-    getInitialTicks(); 
-  };
-
-  ws.onmessage = (msg) => {
-    const data = JSON.parse(msg.data);
-    handleMessage(data);
-  };
-
-  ws.onerror = (err) => console.error('❌ WebSocket error', err);
-
-  ws.onclose = () => {
-    if (stopped) return;
-    console.log('🔄 Reconnecting in 3s...');
-    setTimeout(connect, 3000);
-  };
+// Support Node.js & browser
+let WebSocketClass;
+if (typeof window === "undefined") {
+  WebSocketClass = require("ws");
+} else {
+  WebSocketClass = WebSocket;
 }
 
-// === Forget ===
-function forgetAllTicks() {
-  ws.send(JSON.stringify({ forget_all: 'ticks' }));
-}
+const ws = new WebSocketClass(`wss://ws.derivws.com/websockets/v3?app_id=${APP_ID}`);
 
-function forgetContracts() {
-  ws.send(JSON.stringify({ forget_all: 'proposal_open_contract' }));
-}
+let expiryTime = null;
+let pyramidCount = 0;
 
-// === Ticks ===
-function getInitialTicks() {
-  ws.send(JSON.stringify({
-    ticks_history: SYMBOL,
-    count: 8,
-    end: 'latest',
-    style: 'ticks'
-  }));
-}
+// --- AUTHENTICATE ---
+ws.onopen = () => {
+  console.log("🔌 Connected to Deriv");
 
-function subscribeTicks() {
-  forgetAllTicks();
-  ws.send(JSON.stringify({ ticks: SYMBOL }));
-}
-
-// === Authorize once ===
-function authorize() {
+  // Authorize first
   ws.send(JSON.stringify({ authorize: API_TOKEN }));
-}
+};
 
-// === Proposals ===
-function sendProposal(contractType) {
-  proposalPending = true;
-  console.log(`📝 Requesting proposal for ${contractType} @ stake ${BASE_STAKE.toFixed(2)}`);
+ws.onmessage = (msg) => {
+  const data = JSON.parse(msg.data);
 
-  ws.send(JSON.stringify({
-    proposal: 1,
-    amount: BASE_STAKE,
-    basis: 'stake',
-    contract_type: contractType, 
-    currency: 'USD',
-    duration: 1,
-    duration_unit: 't',
-    symbol: SYMBOL
-  }));
-}
-
-function buyFromProposal(proposalId) {
-  console.log(`🛒 Buying contract id: ${proposalId}`);
-  ws.send(JSON.stringify({
-    buy: proposalId,
-    price: BASE_STAKE 
-  }));
-}
-
-function subscribeToContract(contractId) {
-  ws.send(JSON.stringify({ proposal_open_contract: 1, contract_id: contractId, subscribe: 1 }));
-}
-
-// === Trading Logic ===
-function placeTrade() {
-  if (stopped || tradeInProgress || proposalPending) return;
-
-  let contractType = (streakDirection === 'down') ? 'CALL' : 'PUT';
-  lastTradeDirection = contractType;
-  sendProposal(contractType);
-}
-
-// === Handle Messages ===
-function handleMessage(data) {
   if (data.error) {
-    console.error(`⚠️ API Error: ${data.error.code} - ${data.error.message}`);
-    proposalPending = false;
-    return;
-  }
-
-  const poc = data.proposal_open_contract;
-  if (poc) {
-    if (poc.is_sold) {
-      tradeInProgress = false;
-      const profit = parseFloat(poc.profit);
-      const result = profit >= 0 ? 'WON ✅' : 'LOST ❌';
-
-      console.log(`📊 Contract ${poc.contract_id} settled → ${result} | P/L: ${profit.toFixed(2)} | Stake: ${BASE_STAKE.toFixed(2)}`);
-
-      forgetContracts(); // stop listening to closed contracts
-    } else {
-      console.log(`📡 Contract update: ${poc.contract_id} status → ${poc.status}`);
-    }
+    console.error("❌ Error:", data.error.message || data.error.code);
     return;
   }
 
   switch (data.msg_type) {
-    case 'history':
-      initFromHistory(data.history.prices);
-      subscribeTicks();
+    case "authorize":
+      console.log("🔑 Authorized as:", data.authorize.loginid);
+      fetchLastCandles(CANDLE_COUNT);
       break;
 
-    case 'tick':
-      handleTick(data.tick);
+    case "candles":
+      if (!data.candles || !data.candles.length) return;
+      const candles = data.candles.reverse(); // oldest first
+      console.log("🕯 Last candles:", candles.map(c => c.close));
+
+      const CONTRACT_TYPE = analyzeCandles(candles);
+      console.log("📊 Analysis suggests:", CONTRACT_TYPE);
+
+      placeInitialTrade(CONTRACT_TYPE);
+      
       break;
 
-    case 'authorize':
-      console.log('🔑 Authorized');
-      hasAuthorized = true;
-      placeTrade();
+    case "proposal":
+      console.log("📩 Proposal:", data.proposal.longcode);
+      buyContract(data.proposal.id);
       break;
 
-    case 'proposal':
-      proposalPending = false;
-      if (!data.proposal?.id) {
-        console.error('⚠️ Proposal missing id.');
-        return;
+    case "buy":
+      console.log(`💸 Bought contract (${data.buy.contract_id}) at ${data.buy.buy_price}`);
+      break;
+
+    case "proposal_open_contract":
+      if (data.proposal_open_contract.is_sold) {
+        console.log(`✅ Contract settled. Result: ${data.proposal_open_contract.status}`);
+        console.log(`Payout: ${data.proposal_open_contract.payout}, Profit: ${data.proposal_open_contract.profit}`);
       }
-      buyFromProposal(data.proposal.id);
-      break;
-
-    case 'buy':
-      if (!data.buy?.contract_id) {
-        console.error('⚠️ Buy missing contract_id.');
-        return;
-      }
-      lastContractId = data.buy.contract_id;
-      tradeInProgress = true;
-      console.log(`✅ Trade opened: ${lastContractId} | Direction: ${lastTradeDirection} | Stake: ${BASE_STAKE.toFixed(2)}`);
-      subscribeToContract(lastContractId);
       break;
   }
+};
+
+// --- FUNCTIONS ---
+
+function fetchLastCandles(count) {
+  ws.send(JSON.stringify({
+    ticks_history: SYMBOL,
+    style: "candles",
+    granularity: GRANULARITY,
+    count,
+    end: "latest",
+    subscribe: 1
+  }));
 }
 
-// === Init streak ===
-function initFromHistory(prices) {
-  console.log(`📜 Initializing from last ${prices.length} ticks...`);
-  streakCount = 1;
-  streakDirection = null;
-  lastPrice = prices[0];
+// Analyze candles (majority green = CALL, else PUT)
+function analyzeCandles(candles) {
+  const greenCount = candles.filter(c => c.close > c.open).length;
+  return greenCount >= Math.ceil(candles.length / 2) ? "CALL" : "PUT";
+}
 
-  for (let i = 1; i < prices.length; i++) {
-    if (prices[i] > lastPrice) {
-      if (streakDirection === 'up') streakCount++;
-      else { streakDirection = 'up'; streakCount = 1; }
-    } else if (prices[i] < lastPrice) {
-      if (streakDirection === 'down') streakCount++;
-      else { streakDirection = 'down'; streakCount = 1; }
-    }
-    lastPrice = prices[i];
+function placeInitialTrade(CONTRACT_TYPE) {
+  expiryTime = Math.floor(Date.now() / 1000) + DURATION;
+  console.log("🎯 Placing initial trade:", CONTRACT_TYPE);
+
+  ws.send(JSON.stringify({
+    proposal: 1,
+    amount: STAKE,
+    basis: "stake",
+    contract_type: CONTRACT_TYPE,
+    currency: "USD",
+    duration: DURATION,
+    duration_unit: "s",
+    symbol: SYMBOL
+  }));
+
+  setTimeout(() => placePyramidTrade(CONTRACT_TYPE), 3000);
+}
+
+function placePyramidTrade(CONTRACT_TYPE) {
+  if (pyramidCount >= MAX_PYRAMID) return;
+
+  pyramidCount++;
+  console.log(`📊 Pyramiding trade #${pyramidCount}`);
+
+  const remainingTime = expiryTime - Math.floor(Date.now() / 1000);
+  if (remainingTime <= 5) {
+    console.log("⚠️ Too close to expiry, skipping pyramid trade.");
+    return;
   }
 
-  console.log(`📈 Initial streak: ${streakCount} ${streakDirection}`);
-}
+  ws.send(JSON.stringify({
+    proposal: 1,
+    amount: STAKE,
+    basis: "stake",
+    contract_type: CONTRACT_TYPE,
+    currency: "USD",
+    duration: remainingTime,
+    duration_unit: "s",
+    symbol: SYMBOL
+  }));
 
-// === Tick updates ===
-function handleTick(tick) {
-  if (stopped) return;
-
-  if (lastPrice !== null) {
-    if (tick.quote > lastPrice) {
-      if (streakDirection === 'up') streakCount++;
-      else { streakDirection = 'up'; streakCount = 1; }
-    } else if (tick.quote < lastPrice) {
-      if (streakDirection === 'down') streakCount++;
-      else { streakDirection = 'down'; streakCount = 1; }
-    }
-
-    if (!tradeInProgress && !proposalPending && streakCount >= 8){
-      console.log(`🔥 ${streakCount} ${streakDirection === 'up' ? 'Green' : 'Red'} in a row → placing trade`);
-      if (hasAuthorized) placeTrade(); else authorize();
-    }
+  if (pyramidCount < MAX_PYRAMID) {
+    setTimeout(() => placePyramidTrade(CONTRACT_TYPE), 3000);
   }
-  lastPrice = tick.quote;
 }
 
-// === Start Bot ===
-connect();
+function buyContract(proposalId) {
+  ws.send(JSON.stringify({ buy: proposalId, price: STAKE }));
+}
