@@ -5,13 +5,13 @@
 const APP_ID = 1089; // Replace with your app_id
 const TOKEN = "tUgDTQ6ZclOuNBl"; // Replace with your token
 const SYMBOL = "stpRNG"; // Example symbol
-const BASE_STAKE = 0.35; // Base stake in USD
+const BASE_STAKE = 0.5; // Base stake in USD
 const DURATION = 15;
 const DURATION_UNIT = "s";
 
 // Martingale
 const MARTINGALE_MULTIPLIER = 2.0;
-const MARTINGALE_MAX_STEPS = 5;
+const MARTINGALE_MAX_STEPS = 4;
 
 /* === WebSocket === */
 const WS_URL = `wss://ws.derivws.com/websockets/v3?app_id=${APP_ID}`;
