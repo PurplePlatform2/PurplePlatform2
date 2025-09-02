@@ -11,7 +11,7 @@ const DURATION_UNIT = "s";
 
 // Martingale
 const MARTINGALE_MULTIPLIER = 2.0;
-const MARTINGALE_MAX_STEPS = 4;
+const MARTINGALE_MAX_STEPS = 3;
 
 /* === WebSocket === */
 const WS_URL = `wss://ws.derivws.com/websockets/v3?app_id=${APP_ID}`;
