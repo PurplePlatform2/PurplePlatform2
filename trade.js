@@ -1,15 +1,15 @@
-// deriv-strategy-martingale-once.js
-// Runs ONE strategy cycle per load, applies martingale until win
+// deriv-strategy-reverse-martingale-once.js
+// Runs ONE strategy cycle per load, applies reverse martingale until loss or max streak
 
 /* === CONFIG === */
 const APP_ID = 1089; // Replace with your app_id
 const TOKEN = "tUgDTQ6ZclOuNBl"; // Replace with your token
 const SYMBOL = "stpRNG"; // Example symbol
-const BASE_STAKE = 0.5; // Base stake in USD
+const BASE_STAKE = 0.35; // Base stake in USD
 const DURATION = 15;
 const DURATION_UNIT = "s";
 
-// Martingale
+// Reverse Martingale
 const MARTINGALE_MULTIPLIER = 2.0;
 const MARTINGALE_MAX_STEPS = 3;
 
@@ -30,7 +30,7 @@ let inTrade = false;
 let lastContractId = null;
 let pocSubId = null;
 let currentStake = BASE_STAKE;
-let lossStreak = 0;
+let winStreak = 0;
 
 /* === Helpers === */
 function send(msg) {
@@ -190,18 +190,19 @@ function handlePOC(data) {
   console.log(`POC update: profit=${profit.toFixed(2)} sold=${isSold}`);
 
   if (isSold) {
-    if (profit < 0) {
-      lossStreak++;
-      if (lossStreak <= MARTINGALE_MAX_STEPS) {
+    if (profit > 0) {
+      winStreak++;
+      if (winStreak < MARTINGALE_MAX_STEPS) {
         currentStake *= MARTINGALE_MULTIPLIER;
-        console.log("Loss. Next stake:", currentStake.toFixed(2));
+        console.log("Win ✅ Next stake:", currentStake.toFixed(2));
         placeTrade(contractType);
       } else {
-        console.log("Max martingale reached. Stopping.");
+        console.log("Max win streak reached. Banking profits. 🎯");
         ws.close();
       }
     } else {
-      console.log("Win ✅ Martingale finished.");
+      console.log("Loss ❌ Reset to base stake and stopping.");
+      currentStake = BASE_STAKE;
       ws.close();
     }
   }
