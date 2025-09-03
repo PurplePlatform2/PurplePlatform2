@@ -1,209 +1,197 @@
-// deriv-strategy-reverse-martingale-once.js
-// Runs ONE strategy cycle per load, applies reverse martingale until loss or max streak
+// deriv-martingale-regression.js
+// Node.js + Browser compatible
+// Entry: Linear Regression slope of last 100 ticks
+// Trade: CALL or PUT
+// Martingale: Stake × 2 on loss, reset on win
+// Stop trading after $10 daily profit
 
 /* === CONFIG === */
-const APP_ID = 1089; // Replace with your app_id
-const TOKEN = "tUgDTQ6ZclOuNBl"; // Replace with your token
-const SYMBOL = "stpRNG"; // Example symbol
-const BASE_STAKE = 0.35; // Base stake in USD
-const DURATION = 15;
-const DURATION_UNIT = "s";
+const APP_ID = 1089;                  // Replace with your App ID
+const TOKEN = "tUgDTQ6ZclOuNBl";      // Replace with your API token
+const SYMBOL = "stpRNG";              // Market symbol
+const BASE_STAKE = 0.35;              // Initial stake in USD
+const MULTIPLIER = 1;                 // Martingale multiplier
+const DURATION = 1;                   // Duration in ticks
+const MAX_DAILY_PROFIT = 5;          // Daily target in USD
 
-// Reverse Martingale
-const MARTINGALE_MULTIPLIER = 2.0;
-const MARTINGALE_MAX_STEPS = 3;
-
-/* === WebSocket === */
-const WS_URL = `wss://ws.derivws.com/websockets/v3?app_id=${APP_ID}`;
-const WSClass =
-  typeof globalThis !== "undefined" && globalThis.WebSocket
-    ? globalThis.WebSocket
-    : (typeof require !== "undefined" ? require("ws") : null);
-
-if (!WSClass) throw new Error("WebSocket not found. Use browser or install 'ws'.");
-
-let ws = new WSClass(WS_URL);
-
-/* === State === */
-let contractType = null;
-let inTrade = false;
-let lastContractId = null;
-let pocSubId = null;
+/* === STATE === */
 let currentStake = BASE_STAKE;
-let winStreak = 0;
+let lastContractId = null;
+let tradeDirection = null;
+let lastProposalId = null;
+let dailyProfit = 0;
 
-/* === Helpers === */
-function send(msg) {
-  if (ws && ws.readyState === 1) ws.send(JSON.stringify(msg));
+/* === WEBSOCKET === */
+let connection;
+if (typeof WebSocket !== "undefined") {
+    // Browser
+    connection = new WebSocket(`wss://ws.derivws.com/websockets/v3?app_id=${APP_ID}`);
+} else {
+    // Node.js
+    const WebSocket = require("ws");
+    connection = new WebSocket(`wss://ws.derivws.com/websockets/v3?app_id=${APP_ID}`);
 }
 
-function unsubscribe(id) {
-  if (id) send({ unsubscribe: id });
+/* === HELPERS === */
+function send(msg) {
+    if (connection.readyState === 1) {
+        connection.send(JSON.stringify(msg));
+    } else {
+        setTimeout(() => send(msg), 200);
+    }
+}
+
+function authorize() {
+    send({ authorize: TOKEN });
 }
 
 function toNum(arr) {
-  return arr.map(v => +v);
+    return arr.map(v => +v);
 }
 
-/* === Flow === */
-ws.onopen = () => {
-  console.log("Connected ✅");
-  send({ authorize: TOKEN });
-};
-
-ws.onmessage = (msg) => {
-  const data = JSON.parse(msg.data);
-  if (data.error) {
-    console.error("Error:", data.error.message);
-    return;
-  }
-
-  switch (data.msg_type) {
-    case "authorize":
-      console.log("Authorized");
-      fetchCandles();
-      break;
-
-    case "candles":
-      handleCandles(data.candles);
-      break;
-
-    case "history":
-      if (data.history?.prices) handleTicks(data.history.prices);
-      break;
-
-    case "buy":
-      if (data.buy?.contract_id) {
-        lastContractId = data.buy.contract_id;
-        inTrade = true;
-        console.log("Trade opened:", lastContractId, "stake=", currentStake.toFixed(2));
-        send({
-          proposal_open_contract: 1,
-          contract_id: lastContractId,
-          subscribe: 1,
-        });
-      }
-      break;
-
-    case "proposal_open_contract":
-      handlePOC(data);
-      break;
-  }
-};
-
-/* === Candle check === */
-function fetchCandles() {
-  send({
-    ticks_history: SYMBOL,
-    style: "candles",
-    granularity: 60,
-    count: 4,
-    end: "latest",
-  });
-}
-
-function handleCandles(c) {
-  if (c.length < 4) return;
-
-  const sorted = c.slice().sort((a, b) => a.epoch - b.epoch);
-  const prevClose = +sorted[2].close;
-  const high2 = +sorted[1].high;
-  const high3 = +sorted[0].high;
-  const low2 = +sorted[1].low;
-  const low3 = +sorted[0].low;
-
-  if (prevClose > high2 && prevClose > high3) {
-    contractType = "CALL";
-  } else if (prevClose < low2 && prevClose < low3) {
-    contractType = "PUT";
-  } else {
-    console.log("No signal, exiting.");
-    ws.close();
-    return;
-  }
-  console.log("Signal:", contractType);
-  fetchTicks();
-}
-
-/* === Regression filter === */
+/* === REGRESSION ENTRY === */
 function fetchTicks() {
-  send({
-    ticks_history: SYMBOL,
-    style: "ticks",
-    count: 100,
-    end: "latest",
-  });
+    if (dailyProfit >= MAX_DAILY_PROFIT) {
+        console.log(`🏆 Daily profit target reached: $${dailyProfit.toFixed(2)}. Stopping bot.`);
+        connection.close();
+        return;
+    }
+
+    send({
+        ticks_history: SYMBOL,
+        style: "ticks",
+        count: 100,
+        end: "latest",
+    });
 }
 
 function handleTicks(pricesRaw) {
-  if (!contractType) return;
-  const prices = toNum(pricesRaw);
-  const n = prices.length;
-  if (n < 2) return;
+    const prices = toNum(pricesRaw);
+    const n = prices.length;
+    if (n < 2) return;
 
-  const xMean = (n - 1) / 2;
-  const yMean = prices.reduce((a, b) => a + b, 0) / n;
-  let num = 0, den = 0;
-  for (let i = 0; i < n; i++) {
-    const dx = i - xMean;
-    num += dx * (prices[i] - yMean);
-    den += dx * dx;
-  }
-  const slope = num / den;
-  console.log("Slope:", slope);
-
-  if ((contractType === "CALL" && slope > 0) ||
-      (contractType === "PUT" && slope < 0)) {
-    placeTrade(contractType);
-  } else {
-    console.log("Regression blocked trade. Exiting.");
-    ws.close();
-  }
-}
-
-/* === Place trade === */
-function placeTrade(type) {
-  send({
-    buy: 1,
-    price: currentStake,
-    parameters: {
-      symbol: SYMBOL,
-      contract_type: type,
-      duration: DURATION,
-      duration_unit: DURATION_UNIT,
-      basis: "stake",
-      amount: currentStake,
-      currency: "USD",
-    },
-  });
-}
-
-/* === Proposal Open Contract handling === */
-function handlePOC(data) {
-  const poc = data.proposal_open_contract;
-  if (!poc) return;
-  if (!pocSubId && data.subscription?.id) pocSubId = data.subscription.id;
-
-  const profit = +poc.profit;
-  const isSold = !!poc.is_sold;
-
-  console.log(`POC update: profit=${profit.toFixed(2)} sold=${isSold}`);
-
-  if (isSold) {
-    if (profit > 0) {
-      winStreak++;
-      if (winStreak < MARTINGALE_MAX_STEPS) {
-        currentStake *= MARTINGALE_MULTIPLIER;
-        console.log("Win ✅ Next stake:", currentStake.toFixed(2));
-        placeTrade(contractType);
-      } else {
-        console.log("Max win streak reached. Banking profits. 🎯");
-        ws.close();
-      }
-    } else {
-      console.log("Loss ❌ Reset to base stake and stopping.");
-      currentStake = BASE_STAKE;
-      ws.close();
+    const xMean = (n - 1) / 2;
+    const yMean = prices.reduce((a, b) => a + b, 0) / n;
+    let num = 0, den = 0;
+    for (let i = 0; i < n; i++) {
+        const dx = i - xMean;
+        num += dx * (prices[i] - yMean);
+        den += dx * dx;
     }
-  }
+    const slope = num / den;
+    console.log("📊 Regression slope:", slope);
+
+    if (slope > 0) {
+        tradeDirection = "CALL";
+        requestProposal(currentStake, tradeDirection);
+    } else if (slope < 0) {
+        tradeDirection = "PUT";
+        requestProposal(currentStake, tradeDirection);
+    } else {
+        console.log("❌ No clear slope, retrying.");
+        setTimeout(fetchTicks, 2000);
+    }
 }
+
+/* === PROPOSAL REQUEST === */
+function requestProposal(amount, direction) {
+    console.log(`📥 Requesting proposal | Stake: ${amount} | ${direction}`);
+
+    send({
+        proposal: 1,
+        amount: amount,
+        basis: "stake",
+        contract_type: direction,
+        currency: "USD",
+        duration: DURATION,
+        duration_unit: "t",
+        symbol: SYMBOL,
+    });
+}
+
+/* === PLACE TRADE === */
+function buyContract(proposalId) {
+    console.log(`📈 Buying ${tradeDirection} | Stake: ${currentStake}`);
+    send({ buy: proposalId, price: currentStake });
+}
+
+/* === CONTRACT MANAGEMENT === */
+function handlePOC(data) {
+    const poc = data.proposal_open_contract;
+    if (!poc) return;
+
+    if (poc.contract_id !== lastContractId) return;
+
+    if (poc.is_sold) {
+        console.log("📉 Contract Closed | Profit:", poc.profit);
+
+        dailyProfit += poc.profit;
+        console.log(`💰 Daily Profit: $${dailyProfit.toFixed(2)}`);
+
+        if (dailyProfit >= MAX_DAILY_PROFIT) {
+            console.log(`🏆 Target reached ($${dailyProfit.toFixed(2)}). Stopping bot.`);
+            connection.close();
+            return;
+        }
+
+        if (poc.profit > 0) {
+            console.log("✅ WIN → Reset stake");
+            currentStake = BASE_STAKE;
+        } else {
+            console.log("❌ LOSS → Martingale ×", MULTIPLIER);
+            currentStake *= MULTIPLIER;
+        }
+
+        // Enter next trade with regression check
+        setTimeout(fetchTicks, 2000);
+    } else {
+        console.log(`⏱ Ongoing | Profit: ${poc.profit}`);
+    }
+}
+
+/* === MAIN FLOW === */
+connection.onopen = () => {
+    console.log("✅ WebSocket connected");
+    authorize();
+};
+
+connection.onmessage = (e) => {
+    const data = JSON.parse(e.data);
+
+    if (data.error) {
+        console.error("❌ Error:", data.error.message);
+        return;
+    }
+
+    switch (data.msg_type) {
+        case "authorize":
+            console.log("🔑 Authorized");
+            fetchTicks();
+            break;
+
+        case "history":
+            if (data.history?.prices) handleTicks(data.history.prices);
+            break;
+
+        case "proposal":
+            if (data.proposal?.id) {
+                lastProposalId = data.proposal.id;
+                buyContract(lastProposalId);
+            }
+            break;
+
+        case "buy":
+            lastContractId = data.buy.contract_id;
+            console.log("🎯 Bought contract:", lastContractId);
+            send({ proposal_open_contract: 1, contract_id: lastContractId, subscribe: 1 });
+            break;
+
+        case "proposal_open_contract":
+            handlePOC(data);
+            break;
+    }
+};
+
+connection.onclose = () => {
+    console.log("🔌 WebSocket closed");
+};
