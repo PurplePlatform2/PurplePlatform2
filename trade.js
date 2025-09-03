@@ -7,8 +7,8 @@
 const APP_ID = 1089;                     // Your Deriv App ID
 const TOKEN = "tUgDTQ6ZclOuNBl";         // Your API token
 const SYMBOL = "stpRNG";                 // Market symbol
-const BASE_STAKE = 0.35;                 // Initial stake in USD
-const MULTIPLIER = 1.5;                    // Martingale multiplier (e.g., 2). 1=off
+const BASE_STAKE = 1;                 // Initial stake in USD
+const MULTIPLIER = 2;                    // Martingale multiplier (e.g., 2). 1=off
 const DURATION = 1;                      // Duration in ticks
 const MAX_DAILY_PROFIT = 10;             // Daily target in USD
 
