@@ -1,14 +1,12 @@
-// deriv-dual-trade-martingale.js
-// Places CALL + PUT simultaneously, reruns with martingale (×2.3) until profitable.
-
-/* === CONFIG === */
+// TRADERXY.JS
 const APP_ID = 1089; // Replace with your app_id
 const TOKEN = "tUgDTQ6ZclOuNBl"; // Replace with your token
 const SYMBOL = "stpRNG"; // Example symbol
 const BASE_STAKE = 1; // Stake in USD
 const DURATION = 15;
 const DURATION_UNIT = "s";
-const MULTIPLIER = 1.1;
+const MULTIPLIER = 2.3;
+const HISTORY_COUNT = 100;
 
 /* === WebSocket === */
 const WS_URL = `wss://ws.derivws.com/websockets/v3?app_id=${APP_ID}`;
@@ -26,6 +24,8 @@ let stake = BASE_STAKE;
 let contracts = { CALL: null, PUT: null };
 let activeContracts = { CALL: null, PUT: null };
 let results = { CALL: null, PUT: null };
+let lastTicks = [];
+let tradeReady = false;
 
 /* === Helpers === */
 function send(msg) {
@@ -45,7 +45,13 @@ function round2(num) {
 /* === Flow === */
 ws.onopen = () => {
   console.log("Connected ✅");
-  send({ authorize: TOKEN });
+  // Request initial history
+  send({
+    ticks_history: SYMBOL,
+    count: HISTORY_COUNT,
+    end: "latest",
+    style: "ticks",
+  });
 };
 
 ws.onmessage = (msg) => {
@@ -56,8 +62,18 @@ ws.onmessage = (msg) => {
   }
 
   switch (data.msg_type) {
+    case "history":
+      lastTicks = data.history.prices;
+      console.log(`📊 Loaded ${lastTicks.length} historical ticks`);
+      send({ ticks: SYMBOL, subscribe: 1 }); // Subscribe to live ticks
+      break;
+
+    case "tick":
+      handleTick(data.tick);
+      break;
+
     case "authorize":
-      console.log("Authorized");
+      console.log("Authorized 🔑");
       requestProposals();
       break;
 
@@ -74,6 +90,26 @@ ws.onmessage = (msg) => {
       break;
   }
 };
+
+/* === Tick Handling & Condition === */
+function handleTick(tick) {
+  lastTicks.push(tick.quote);
+  if (lastTicks.length > HISTORY_COUNT) lastTicks.shift();
+
+  console.log(`💹 Tick: ${tick.quote}`);
+
+  // Only trade if last tick == tick 15 steps ago
+  if (!tradeReady && lastTicks.length > 15) {
+    const latest = lastTicks[lastTicks.length - 1];
+    const prev15 = lastTicks[lastTicks.length - 1 - 15];
+
+    if (latest === prev15) {
+      console.log(`🚀 Condition met! Tick ${latest} repeated after 15 steps`);
+      tradeReady = true;
+      send({ authorize: TOKEN });
+    }
+  }
+}
 
 /* === Proposals & Buying === */
 function requestProposals() {
@@ -95,9 +131,7 @@ function requestProposals() {
 function handleProposal(data) {
   const contractType = data.echo_req.contract_type;
   contracts[contractType] = data.proposal.id;
-  console.log(
-    `Proposal for ${contractType} → payout: ${data.proposal.display_value}`
-  );
+  console.log(`Proposal for ${contractType} → payout: ${data.proposal.display_value}`);
 
   if (contracts.CALL && contracts.PUT && !activeContracts.CALL && !activeContracts.PUT) {
     ["CALL", "PUT"].forEach((type) => {
@@ -135,7 +169,6 @@ function handlePOC(data) {
   if (isSold) {
     results[type] = profit;
 
-    // When both closed → evaluate once
     if (results.CALL !== null && results.PUT !== null) {
       evaluateFinal();
     }
@@ -154,6 +187,7 @@ function evaluateFinal() {
     console.log("❌ Not profitable. Retrying with martingale...");
     stake = round2(stake * MULTIPLIER);
     console.log(`🔄 Next stake = ${stake}`);
+    tradeReady = false; // reset so next repeat can trigger
     requestProposals();
   }
 }
