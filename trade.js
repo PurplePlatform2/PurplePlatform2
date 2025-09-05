@@ -8,7 +8,7 @@ const SYMBOL = "stpRNG"; // Example symbol
 const BASE_STAKE = 1; // Stake in USD
 const DURATION = 15;
 const DURATION_UNIT = "s";
-const MULTIPLIER = 2.3;
+const MULTIPLIER = 1.1;
 
 /* === WebSocket === */
 const WS_URL = `wss://ws.derivws.com/websockets/v3?app_id=${APP_ID}`;
