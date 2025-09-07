@@ -2,11 +2,12 @@
 const APP_ID = 1089; // Replace with your app_id
 const TOKEN = "tUgDTQ6ZclOuNBl"; // Replace with your token
 const SYMBOL = "stpRNG"; // Example symbol
-const BASE_STAKE = 1; // Stake in USD
+const BASE_STAKE = 0.35; // Stake in USD
 const DURATION = 15;
 const DURATION_UNIT = "s";
 const MULTIPLIER = 2.3;
 const HISTORY_COUNT = 100;
+const MAXMartingale=2;
 
 /* === WebSocket === */
 const WS_URL = `wss://ws.derivws.com/websockets/v3?app_id=${APP_ID}`;
@@ -18,7 +19,7 @@ const WSClass =
 if (!WSClass) throw new Error("WebSocket not found. Use browser or install 'ws'.");
 
 let ws = new WSClass(WS_URL);
-
+let currentMartingale=0;
 /* === State === */
 let stake = BASE_STAKE;
 let contracts = { CALL: null, PUT: null };
@@ -188,6 +189,7 @@ function evaluateFinal() {
     stake = round2(stake * MULTIPLIER);
     console.log(`🔄 Next stake = ${stake}`);
     tradeReady = false; // reset so next repeat can trigger
-    requestProposals();
+   currentMartingale++;
+ if(MAXMartingale>currentMartingale)  requestProposals();
   }
 }
