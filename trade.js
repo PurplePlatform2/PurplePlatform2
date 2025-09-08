@@ -314,6 +314,7 @@ function evaluateFinal() {
     console.log("❌ Loss. Resetting to base stake and waiting for next pattern.");
     // reset stake to base (no martingale)
     stake = BASE_STAKE;
+   ws.close();
     return;
     // prepare for next cycle: allow re-authorize and new proposal requests
     tradeReady = false;
