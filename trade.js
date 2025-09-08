@@ -1,14 +1,12 @@
-// TRADERXY.JS (15-tick candle version) — fixed double-subscription / duplicate buys
+// TRADERXY.JS (15-tick candle version) — martingale removed
 
 const APP_ID = 1089;
 const TOKEN = "tUgDTQ6ZclOuNBl";
 const SYMBOL = "stpRNG";
-const BASE_STAKE = 0.35;
+const BASE_STAKE = 1;
 const DURATION = 15;
 const DURATION_UNIT = "s";
-const MULTIPLIER = 4;
 const HISTORY_COUNT = 46; // pull 46 ticks
-const MAXMartingale = 5;
 
 const WS_URL = `wss://ws.derivws.com/websockets/v3?app_id=${APP_ID}`;
 const WSClass =
@@ -19,7 +17,6 @@ const WSClass =
 if (!WSClass) throw new Error("WebSocket not found. Use browser or install 'ws'.");
 
 let ws = new WSClass(WS_URL);
-let currentMartingale = 0;
 
 /* === State === */
 let stake = BASE_STAKE;
@@ -122,7 +119,6 @@ ws.onmessage = (msg) => {
 
     default:
       // other messages can be ignored or logged if helpful
-      // console.log("unhandled:", data.msg_type);
       break;
   }
 };
@@ -267,7 +263,6 @@ function handleBuy(data) {
   }
 
   // Determine type by matching contract_id into activeContracts (if echoed) or by matching echo_req.buy to proposal id
-  // Best attempt: check echo_req.buy (should be the proposal id used)
   const echoBuy = data.echo_req && data.echo_req.buy;
   let typeFound = null;
 
@@ -316,22 +311,18 @@ function evaluateFinal() {
     console.log("✅ Profitable! Exiting.");
     ws.close();
   } else {
-    console.log("❌ Loss. Martingale...");
-    currentMartingale++;
-    if (currentMartingale > MAXMartingale) {
-      console.log("Reached MAX martingale. Stopping.");
-      ws.close();
-      return;
-    }
-    stake = round2(stake * MULTIPLIER);
-    console.log(`🔄 Next stake=${stake}`);
+    console.log("❌ Loss. Resetting to base stake and waiting for next pattern.");
+    // reset stake to base (no martingale)
+    stake = BASE_STAKE;
+
     // prepare for next cycle: allow re-authorize and new proposal requests
     tradeReady = false;
     isAuthorizeRequested = false; // allow re-authorize for next cycle
     isTickSubscribed = false; // re-enable tick subscription if needed
     proposalsRequested = false;
     resetCycle();
-    // request authorization again (guarded)
+
+    // request authorization again (guarded) so we can enter the next cycle when pattern appears
     if (!isAuthorizeRequested) {
       console.log("Requesting authorization for next cycle...");
       sendWhenReady({ authorize: TOKEN });
