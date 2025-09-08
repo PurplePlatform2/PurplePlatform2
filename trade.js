@@ -311,23 +311,9 @@ function evaluateFinal() {
     console.log("✅ Profitable! Exiting.");
     ws.close();
   } else {
-    console.log("❌ Loss. Resetting to base stake and waiting for next pattern.");
-    // reset stake to base (no martingale)
+    console.log("❌ Loss. Exiting.");
     stake = BASE_STAKE;
-   ws.close();
-    return;
-    // prepare for next cycle: allow re-authorize and new proposal requests
-    tradeReady = false;
-    isAuthorizeRequested = false; // allow re-authorize for next cycle
-    isTickSubscribed = false; // re-enable tick subscription if needed
-    proposalsRequested = false;
-    resetCycle();
-
-    // request authorization again (guarded) so we can enter the next cycle when pattern appears
-    if (!isAuthorizeRequested) {
-      console.log("Requesting authorization for next cycle...");
-      sendWhenReady({ authorize: TOKEN });
-      isAuthorizeRequested = true;
-    }
+    ws.close();
   }
 }
+
