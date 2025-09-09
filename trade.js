@@ -7,6 +7,7 @@ const BASE_STAKE = 1;
 const DURATION = 15;
 const DURATION_UNIT = "s";
 const HISTORY_COUNT = 46; // pull 46 ticks
+const MaxTradeCycles= 2;
 
 const WS_URL = `wss://ws.derivws.com/websockets/v3?app_id=${APP_ID}`;
 const WSClass =
@@ -25,6 +26,7 @@ let activeContracts = { CALL: null, PUT: null }; // stores contract ids after bu
 let results = { CALL: null, PUT: null };
 let lastTicks = [];
 let tradeReady = false;
+let cyclesDone=0;
 
 /* === Protection flags to avoid double actions === */
 let isTickSubscribed = false; // prevents subscribing to ticks multiple times
@@ -309,7 +311,10 @@ function evaluateFinal() {
 
   if (net > 0) {
     console.log("✅ Profitable! Exiting.");
-    ws.close();
+    cyclesDone++;
+    resetCycle();
+  if(cyclesDone<MaxTradeCycles)  requestProposals();
+ else  ws.close();
   } else {
     console.log("❌ Loss. Exiting.");
     stake = BASE_STAKE;
