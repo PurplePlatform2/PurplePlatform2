@@ -1,9 +1,9 @@
 // TRADERXY.JS (15-tick distance entry) — dual trade system
 
 const APP_ID = 1089;
-const TOKEN = "tUgDTQ6ZclOuNBl";
+const TOKEN = "GrDCl7fo5axufb2";
 const SYMBOL = "stpRNG";
-const BASE_STAKE = 1;
+const BASE_STAKE = 0.35;
 const DURATION = 15;
 const DURATION_UNIT = "s";
 const HISTORY_COUNT = 15; // always 15 ticks
@@ -109,7 +109,7 @@ ws.onmessage = (msg) => {
       let redeem = cProfit(data.profit_table.transactions);
       if (redeem.total < 0) {
         console.log("📉 Previous loss:", redeem.total);
-        stake = redeem.stake * 5;
+        stake = redeem.stake * 1;
         requestProposals();
       } else {
         console.log("📈 Previous profit:", redeem.total);
