@@ -1,4 +1,4 @@
-// TRADERXY.JS (Markov–Volatility entry) — martingale removed
+// TRADERXY.JS (15-tick distance entry) — dual trade system
 
 const APP_ID = 1089;
 const TOKEN = "tUgDTQ6ZclOuNBl";
@@ -6,7 +6,7 @@ const SYMBOL = "stpRNG";
 const BASE_STAKE = 1;
 const DURATION = 15;
 const DURATION_UNIT = "s";
-const HISTORY_COUNT = 5000; // pull 5000 ticks for Markov-volatility model
+const HISTORY_COUNT = 15; // always 15 ticks
 
 const WS_URL = `wss://ws.derivws.com/websockets/v3?app_id=${APP_ID}`;
 const WSClass =
@@ -55,57 +55,12 @@ const cProfit = r => {
   return {individual:i,total:+i.reduce((s,x)=>s+x.profit,0).toFixed(2),stake:+(t.reduce((s,x)=>s+x.buy_price,0)/t.length).toFixed(2)};
 };
 
-/* === Markov–Volatility Model === */
-
-// simple 2-state Markov regime model with EWMA variance per state
-function getVolatilityScore(ticks) {
-  if (ticks.length < 2) return 0;
-
-  // returns
-  const returns = new Float64Array(ticks.length - 1);
-  for (let i = 1; i < ticks.length; i++) {
-    returns[i - 1] = ticks[i].quote - ticks[i - 1].quote;
-  }
-
-  // 2 states: calm, volatile
-  const alpha = 0.03;
-  let mu = returns[0];
-  let ewmaVar = 0;
-  for (let i = 1; i < returns.length; i++) {
-    const r = returns[i];
-    mu = alpha * r + (1 - alpha) * mu;
-    const dev = r - mu;
-    ewmaVar = alpha * (dev * dev) + (1 - alpha) * ewmaVar;
-  }
-  const sigma = Math.sqrt(ewmaVar || 0);
-
-  // Markov transition (fixed for simplicity; can be estimated offline)
-  const P = [
-    [0.92, 0.08], // Calm→Calm, Calm→Vol
-    [0.15, 0.85], // Vol→Calm, Vol→Vol
-  ];
-
-  // infer regime probs (rough — based on sigma threshold)
-  const calmProb = 1 / (1 + Math.exp(-(-2 + sigma * 50)));
-  const volProb = 1 - calmProb;
-
-  // forward 15 steps
-  let gamma = [calmProb, volProb];
-  let V15 = 0;
-  let s2 = sigma * sigma;
-  for (let k = 1; k <= 15; k++) {
-    gamma = [gamma[0]*P[0][0] + gamma[1]*P[1][0],
-             gamma[0]*P[0][1] + gamma[1]*P[1][1]];
-    // expected variance: calm has lower, vol has higher
-    const calmVar = s2 * 0.5;
-    const volVar = s2 * 2.0;
-    const expVar = gamma[0]*calmVar + gamma[1]*volVar;
-    V15 += expVar;
-  }
-
-  // logistic squash into [0,1]
-  const score = 1 / (1 + Math.exp(-V15 / (sigma + 1e-6)));
-  return Math.min(1, Math.max(0, score));
+/* === Distance Test === */
+function getDistanceScore(ticks) {
+  if (ticks.length < 15) return 0;
+  const first = ticks[0].quote;
+  const last = ticks[ticks.length - 1].quote;
+  return Math.abs(last - first);
 }
 
 /* === Flow === */
@@ -133,7 +88,7 @@ ws.onmessage = (msg) => {
         quote: p,
       }));
       console.log(`📊 Loaded ${lastTicks.length} ticks`);
-      tryTradeFromVolatility();
+      tryTradeFromDistance();
       break;
 
     case "tick":
@@ -173,12 +128,12 @@ ws.onmessage = (msg) => {
 };
 
 /* === Entry Logic === */
-function tryTradeFromVolatility() {
-  const score = getVolatilityScore(lastTicks);
-  console.log(`🔎 Volatility score=${score.toFixed(3)}`);
+function tryTradeFromDistance() {
+  const score = getDistanceScore(lastTicks);
+  console.log(`🔎 Distance score=${score.toFixed(3)}`);
 
-  if (score > 0.797) {
-    console.log("🚀 Volatility regime favorable → enter CALL+PUT");
+  if (score > 0.7) {
+    console.log("🚀 Condition met → enter CALL+PUT");
     tradeReady = true;
     if (!isAuthorizeRequested) {
       sendWhenReady({ authorize: TOKEN });
@@ -188,7 +143,7 @@ function tryTradeFromVolatility() {
         sendWhenReady({ profit_table: 1, description: 1, limit: 2, offset: 0, sort: "DESC" });
     }
   } else {
-    console.log("⚠️ Volatility not favorable. Waiting...");
+    console.log("⚠️ Condition not met. Waiting...");
     if (!isTickSubscribed) {
       sendWhenReady({ ticks: SYMBOL, subscribe: 1 });
       isTickSubscribed = true;
@@ -201,7 +156,7 @@ function handleTick(tick) {
   if (lastTicks.length > HISTORY_COUNT) lastTicks.shift();
   console.log(`💹 Tick: ${tick.quote}`);
   if (!tradeReady && lastTicks.length >= HISTORY_COUNT) {
-    tryTradeFromVolatility();
+    tryTradeFromDistance();
   }
 }
 
