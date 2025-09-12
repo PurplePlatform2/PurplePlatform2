@@ -15,7 +15,7 @@ const token = "GrDCl7fo5axufb2"; // 🔐 Replace with your real token
 const stake = 2;
 const symbol = "stpRNG";
 const multiplier = 750;
-const THRESHOLD = 0.7;
+const THRESHOLD = 0.8;
 const MIN_BALANCE = 50;
 
 /* === STATE === */
