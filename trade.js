@@ -1,8 +1,7 @@
-//Checking if 30ticks crossed 1minute thresshold
+//Checking if 30ticks crossed 1minute threshold
 
 /* === Mean Reversion Multiplier Bot (Node.js + Browser Compatible) === */
 
-// Auto-detect WebSocket implementation
 let WSClass;
 if (typeof window !== "undefined" && window.WebSocket) {
   WSClass = window.WebSocket; // Browser
@@ -11,13 +10,13 @@ if (typeof window !== "undefined" && window.WebSocket) {
 }
 
 /* === CONFIG === */
-const APP_ID = 1089; // Your Deriv App ID
-const token = "tUgDTQ6ZclOuNBl"; // 🔐 Replace with your real token
+const APP_ID = 1089;
+const token = "GrDCl7fo5axufb2"; // 🔐 Replace with your real token
 const stake = 2;
 const symbol = "stpRNG";
 const multiplier = 750;
-const MAX_PROFIT = 0.01; // ✅ Auto-close when profit hits this
-const THRESHOLD = 0.7; // mean-reversion trigger
+const THRESHOLD = 0.7;
+const MIN_BALANCE = 50;
 
 /* === STATE === */
 const ws = new WSClass(`wss://ws.derivws.com/websockets/v3?app_id=${APP_ID}`);
@@ -25,32 +24,29 @@ let contract_id = null;
 let bought = false;
 let ticksWindow = [];
 let subscribedToTicks = false;
+let accountBalance = 0;
+let trackedContracts = new Set(); // ✅ track already-subscribed contracts
 
 /* === HELPERS === */
-function safeParseFloat(v) {
-  const n = parseFloat(v);
-  return Number.isFinite(n) ? n : null;
-}
+const safeParseFloat = v => (Number.isFinite(parseFloat(v)) ? parseFloat(v) : null);
 
 function checkWindowAndMaybeBuy() {
   if (bought || ticksWindow.length < 15) return;
+  if (accountBalance <= MIN_BALANCE) {
+    console.log(`⛔ Balance $${accountBalance} ≤ ${MIN_BALANCE}`);
+    return;
+  }
 
   const oldest = ticksWindow[0];
   const latest = ticksWindow[ticksWindow.length - 1];
   if (oldest == null || latest == null) return;
 
   const diff = latest - oldest;
-  console.log(`🔎 15-tick diff -> oldest: ${oldest}, latest: ${latest}, diff: ${diff.toFixed(6)}`);
+  console.log(`📈 15-tick Δ: ${diff.toFixed(5)}`);
 
-  // === Mean Reversion Logic ===
   let direction = null;
-  if (diff > THRESHOLD) {
-    // Price went UP too much → expect down
-    direction = "MULTDOWN";
-  } else if (diff < -THRESHOLD) {
-    // Price went DOWN too much → expect up
-    direction = "MULTUP";
-  }
+  if (diff > THRESHOLD) direction = "MULTDOWN";
+  else if (diff < -THRESHOLD) direction = "MULTUP";
 
   if (direction) buyMultiplier(direction);
 }
@@ -58,34 +54,38 @@ function checkWindowAndMaybeBuy() {
 function buyMultiplier(contract_type) {
   if (bought) return;
   bought = true;
-  console.log(`🚀 Sending MULTIPLIER BUY (${contract_type}) - stake: ${stake}, multiplier: ${multiplier}`);
-
-  const payload = {
+  console.log(`🚀 BUY ${contract_type} | stake $${stake} | x${multiplier}`);
+  ws.send(JSON.stringify({
     buy: 1,
     price: stake,
     parameters: {
-      amount: stake,
-      basis: "stake",
-      contract_type,
-      currency: "USD",
-      multiplier,
-      symbol,
+      amount: stake, basis: "stake", contract_type,
+      currency: "USD", multiplier, symbol
     },
-  };
-
-  ws.send(JSON.stringify(payload));
+  }));
 }
 
 function subscribeTicks() {
   if (subscribedToTicks) return;
   subscribedToTicks = true;
-  console.log("🔔 Subscribing to live ticks...");
+  console.log("🔔 Subscribed to ticks");
   ws.send(JSON.stringify({ ticks: symbol, subscribe: 1 }));
 }
 
 function unsubscribeTicks() {
   subscribedToTicks = false;
-  console.log("🔕 Entry tick subscription disabled (flag only).");
+  console.log("🔕 Tick feed off");
+}
+
+/* === Portfolio Helpers === */
+function checkPortfolio() {
+  ws.send(JSON.stringify({ portfolio: 1 }));
+}
+
+function inspectContract(cid) {
+  if (trackedContracts.has(cid)) return; // ✅ skip duplicates
+  trackedContracts.add(cid);
+  ws.send(JSON.stringify({ proposal_open_contract: 1, contract_id: cid, subscribe: 1 }));
 }
 
 /* === CONNECTION === */
@@ -97,90 +97,83 @@ ws.onopen = () => {
 ws.onmessage = (msg) => {
   const data = JSON.parse(msg.data || msg);
   if (data.error) {
-    console.error("❌ Error:", data.error.message || data.error);
+    console.error("❌", data.error.message || data.error);
     return;
   }
 
   const mt = data.msg_type || "";
 
-  // --- Authorization complete ---
-  if (mt === "authorize" || data.authorize) {
-    console.log("✅ Authorized:", data.authorize?.loginid);
-    // Request last 15 ticks
-    ws.send(
-      JSON.stringify({
-        ticks_history: symbol,
-        end: "latest",
-        count: 15,
-        style: "ticks",
-      })
-    );
+  if (mt === "authorize") {
+    console.log("✅ Authorized", data.authorize?.loginid);
+    ws.send(JSON.stringify({ balance: 1 }));
+    checkPortfolio(); // ✅ only once at startup
+    ws.send(JSON.stringify({ ticks_history: symbol, end: "latest", count: 15, style: "ticks" }));
     return;
   }
 
-  // --- History response ---
-  if (mt === "history" || data.history) {
-    const prices = (data.history && data.history.prices) || [];
-    ticksWindow = prices.map((p) => safeParseFloat(p)).filter((p) => p !== null);
-    if (ticksWindow.length > 15) ticksWindow = ticksWindow.slice(-15);
-    console.log(`🧾 Got history ticks (${ticksWindow.length})`);
+  if (mt === "balance") {
+    accountBalance = safeParseFloat(data.balance?.balance) || 0;
+    console.log(`💰 Balance: $${accountBalance}`);
+    return;
+  }
+
+  if (mt === "portfolio") {
+    const contracts = data.portfolio?.contracts || [];
+    console.log(`📂 Open contracts: ${contracts.length}`);
+    contracts.forEach(c => inspectContract(c.contract_id)); // ✅ subscribe live
+    return;
+  }
+
+  if (mt === "history") {
+    ticksWindow = (data.history?.prices || [])
+      .map(safeParseFloat).filter(p => p !== null).slice(-15);
+    console.log(`🧾 History: ${ticksWindow.length} ticks`);
     checkWindowAndMaybeBuy();
     if (!bought) subscribeTicks();
     return;
   }
 
-  // --- Live tick ---
-  if (mt === "tick" || data.tick) {
+  if (mt === "tick") {
     const quote = safeParseFloat(data.tick?.quote);
     if (quote == null) return;
-
     ticksWindow.push(quote);
     if (ticksWindow.length > 15) ticksWindow.shift();
-
     if (!bought) checkWindowAndMaybeBuy();
-    return;
+    return; // ✅ no more portfolio spam
   }
 
-  // --- Buy response ---
-  if (mt === "buy" || data.buy) {
+  if (mt === "buy") {
     contract_id = data.buy?.contract_id;
-    console.log("✅ Bought contract:", contract_id);
+    console.log(`✅ Bought #${contract_id}`);
     unsubscribeTicks();
-    ws.send(
-      JSON.stringify({
-        proposal_open_contract: 1,
-        contract_id,
-        subscribe: 1,
-      })
-    );
+    inspectContract(contract_id); // ✅ live subscribe
     return;
   }
 
-  // --- Contract updates ---
-  if (mt === "proposal_open_contract" || data.proposal_open_contract) {
+  if (mt === "proposal_open_contract") {
     const poc = data.proposal_open_contract;
     if (!poc) return;
+    console.log(`📊 #${poc.contract_id} | ${poc.status} | entry:${poc.buy_price} spot:${poc.current_spot} P/L:${poc.profit}`);
 
-    console.log(`📊 Contract Update:
-      contract_id: ${poc.contract_id}
-      status: ${poc.status}
-      entry_price: ${poc.buy_price}
-      current_price: ${poc.current_spot}
-      profit: ${poc.profit}`
-    );
-
-    if (poc.profit >= MAX_PROFIT && poc.status === "open") {
-      console.log(`🛑 Closing trade: Profit reached ${poc.profit}`);
-      ws.send(JSON.stringify({ sell: poc.contract_id, price: 0 }));
+    if (poc.profit > 0 && poc.is_sold === 0) {
+      console.log(`🛑 Closing #${poc.contract_id} | Profit:${poc.profit}`);
+      ws.send(JSON.stringify({ sell: poc.contract_id, price: poc.bid_price || 0 }));
     }
 
     if (poc.status !== "open") {
-      console.log("🏁 Contract closed. Final Profit:", poc.profit);
-      ws.close();
+      console.log(`🏁 Closed #${poc.contract_id} | Final P/L:${poc.profit}`);
+      bought = false;
+      contract_id = null;
+      trackedContracts.delete(poc.contract_id); // ✅ free up slot
     }
+    return;
+  }
+
+  if (mt === "sell") {
+    console.log(`💰 Sold #${data.sell.contract_id} @${data.sell.sell_price}`);
     return;
   }
 };
 
-ws.onerror = (err) => console.error("⚠️ WebSocket error:", err.message || err);
-ws.onclose = () => console.log("🔒 WebSocket closed.");
+ws.onerror = (err) => console.error("⚠️ WS error:", err.message || err);
+ws.onclose = () => console.log("🔒 WS closed");
