@@ -11,7 +11,7 @@ if (typeof window !== "undefined" && window.WebSocket) {
 
 /* === CONFIG === */
 const APP_ID = 1089;
-const token = "GrDCl7fo5axufb2"; // 🔐 Replace with your real token
+const token = "tUgDTQ6ZclOuNBl"; // 🔐 Replace with your real token
 const stake = 2;
 const symbol = "stpRNG";
 const multiplier = 750;
