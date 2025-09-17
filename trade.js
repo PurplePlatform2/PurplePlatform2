@@ -26,7 +26,7 @@ let results = { CALL: null, PUT: null };
 let lastTicks = [];
 let tradeReady = false;
 
-/* === Protection flags to avoid double actions === */
+/* === Protection flags === */
 let isTickSubscribed = false;
 let isAuthorizeRequested = false;
 let proposalsRequested = false;
@@ -107,7 +107,7 @@ ws.onmessage = (msg) => {
     case "profit_table":
       let redeem = cProfit(data.profit_table.transactions);
       if (redeem.total < 0) {
-        console.log("\n**Recieved History>>loss::", redeem.total);
+        console.log("\n**Received History>>loss::", redeem.total);
         stake = redeem.stake * 5;
         requestProposals();
       } else {
@@ -126,20 +126,7 @@ ws.onmessage = (msg) => {
   }
 };
 
-/* === Build 15-tick candles === */
-function build15TickCandles(ticks) {
-  const candles = [];
-  for (let i = 0; i + 14 < ticks.length; i += 15) {
-    const slice = ticks.slice(i, i + 15);
-    const open = slice[0].quote;
-    const close = slice[slice.length - 1].quote;
-    const high = Math.max(...slice.map((t) => t.quote));
-    const low = Math.min(...slice.map((t) => t.quote));
-    candles.push({ open, high, low, close });
-  }
-  return candles;
-}
-
+/* === Profit Parser === */
 const cProfit = (r) => {
   const t =
     typeof r === "string" ? JSON.parse("[" + r.replace(/^\[?|\]?$/g, "") + "]") : r;
@@ -155,36 +142,18 @@ const cProfit = (r) => {
   };
 };
 
-/* === ENTRY LOGIC MODIFIED WITH 15-TICK DIFFERENCE === */
+/* === ENTRY LOGIC: ONLY ±1.0 === */
 function tryPatternAndTradeFromTicks() {
   if (lastTicks.length < 16) return;
 
-  const diff = round2(lastTicks[lastTicks.length - 1].quote - lastTicks[lastTicks.length - 16].quote);
+  const diff = round2(
+    lastTicks[lastTicks.length - 1].quote -
+      lastTicks[lastTicks.length - 16].quote
+  );
   console.log(`📏 Difference (current - 15 ago) = ${diff}`);
 
-  if (diff !== 1.0 || diff !== -1.0) {
-    console.log("❌ Condition not met (needs exactly +/-1.0). Waiting...");
-    return;
-  }
-
-  const candles = build15TickCandles(lastTicks);
-  console.log(`Built ${candles.length} candles from ${lastTicks.length} ticks`);
-
-  if (candles.length < 3) return;
-
-  const c1 = candles[candles.length - 1];
-  const h2 = candles[candles.length - 2].high;
-  const h3 = candles[candles.length - 3].high;
-  const l2 = candles[candles.length - 2].low;
-  const l3 = candles[candles.length - 3].low;
-
-  const tomRed = c1.close > Math.max(h2, h3);
-  const tomGreen = c1.close < Math.min(l2, l3);
-
-  console.log(`tomRed=${tomRed} tomGreen=${tomGreen}`);
-
-  if (tomRed || tomGreen) {
-    console.log("🚀 tom pattern found → preparing to enter CALL+PUT");
+  if (diff === 1.0 || diff === -1.0) {
+    console.log("✅ Condition met (exactly ±1.0) → preparing to enter CALL+PUT");
     tradeReady = true;
     if (!isAuthorizeRequested) {
       console.log("Requesting authorization...");
@@ -195,7 +164,7 @@ function tryPatternAndTradeFromTicks() {
         sendWhenReady({ profit_table: 1, description: 1, limit: 2, offset: 0, sort: "DESC" });
     }
   } else {
-    console.log("No tom pattern yet.");
+    console.log("❌ Condition not met (needs exactly ±1.0). Waiting...");
     if (!isTickSubscribed) {
       console.log("Subscribing to live ticks...");
       sendWhenReady({ ticks: SYMBOL, subscribe: 1 });
@@ -239,7 +208,8 @@ function requestProposals() {
 
 function handleProposal(data) {
   const echo = data.echo_req || {};
-  const contractType = echo.contract_type || (echo.proposal && echo.proposal.contract_type);
+  const contractType =
+    echo.contract_type || (echo.proposal && echo.proposal.contract_type);
   if (!contractType) return;
   const proposalId = data.proposal && data.proposal.id;
   if (!proposalId) return;
@@ -272,7 +242,11 @@ function handleBuy(data) {
   }
   activeContracts[typeFound] = contractId;
   console.log(`Trade opened: ${typeFound}, ID=${contractId}, stake=${stake}`);
-  sendWhenReady({ proposal_open_contract: 1, contract_id: contractId, subscribe: 1 });
+  sendWhenReady({
+    proposal_open_contract: 1,
+    contract_id: contractId,
+    subscribe: 1,
+  });
 }
 
 function handlePOC(data) {
