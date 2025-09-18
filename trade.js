@@ -20,11 +20,12 @@ let ws = new WSClass(WS_URL);
 
 /* === State === */
 let stake = BASE_STAKE;
-let contracts = { CALL: null, PUT: null }; // stores proposal ids
-let activeContracts = { CALL: null, PUT: null }; // stores contract ids after buy
-let results = { CALL: null, PUT: null };
+let contracts = {}; // stores proposal id for the selected type
+let activeContracts = {}; // stores contract id after buy
+let results = {};
 let lastTicks = [];
 let tradeReady = false;
+let selectedContractType = null;
 
 /* === Protection flags === */
 let isTickSubscribed = false;
@@ -51,11 +52,12 @@ function sendWhenReady(msg) {
 }
 
 function resetCycle() {
-  contracts = { CALL: null, PUT: null };
-  activeContracts = { CALL: null, PUT: null };
-  results = { CALL: null, PUT: null };
+  contracts = {};
+  activeContracts = {};
+  results = {};
   buyInProgress = false;
   proposalsRequested = false;
+  selectedContractType = null;
 }
 
 function round2(num) {
@@ -97,7 +99,7 @@ ws.onmessage = (msg) => {
     case "authorize":
       console.log("Authorized response received.");
       isAuthorizeRequested = true;
-      sendWhenReady({ profit_table: 1, description: 1, limit: 2, offset: 0, sort: "DESC" });
+      requestProposals();
       break;
 
     case "proposal":
@@ -108,12 +110,11 @@ ws.onmessage = (msg) => {
       let redeem = cProfit(data.profit_table.transactions);
       if (redeem.total < 0) {
         console.log("\n**Received History>>loss::", redeem.total);
-        stake = redeem.stake * 5;
-        requestProposals();
+        stake = redeem.stake ;
       } else {
         console.log("Previous trade profitable::", redeem.total);
-        requestProposals();
       }
+      requestProposals();
       break;
 
     case "buy":
@@ -152,16 +153,21 @@ function tryPatternAndTradeFromTicks() {
   );
   console.log(`📏 Difference (current - 15 ago) = ${diff}`);
 
-  if (diff === 1.0 || diff === -1.0) {
-    console.log("✅ Condition met (exactly ±1.0) → preparing to enter CALL+PUT");
+  if (diff >= 1.0 || diff <= -1.0) {
     tradeReady = true;
+    selectedContractType = diff >0 ? "PUT" : "CALL";
+    console.log(
+      `✅ Condition met (${diff}) → preparing to ${
+        selectedContractType === "CALL" ? "BUY" : "SELL"
+      } (${selectedContractType})`
+    );
+
     if (!isAuthorizeRequested) {
       console.log("Requesting authorization...");
       sendWhenReady({ authorize: TOKEN });
       isAuthorizeRequested = true;
     } else {
-      if (!proposalsRequested)
-        sendWhenReady({ profit_table: 1, description: 1, limit: 2, offset: 0, sort: "DESC" });
+      requestProposals();
     }
   } else {
     console.log("❌ Condition not met (needs exactly ±1.0). Waiting...");
@@ -185,42 +191,35 @@ function handleTick(tick) {
 
 /* === Proposals & Buying === */
 function requestProposals() {
-  if (proposalsRequested) {
-    console.log("Proposals already requested — skipping duplicate request.");
-    return;
-  }
+  if (proposalsRequested || !selectedContractType) return;
   proposalsRequested = true;
-  resetCycle();
-  console.log("Requesting proposals for CALL and PUT...");
-  ["CALL", "PUT"].forEach((type) => {
-    sendWhenReady({
-      proposal: 1,
-      amount: stake,
-      basis: "stake",
-      contract_type: type,
-      currency: "USD",
-      duration: DURATION,
-      duration_unit: DURATION_UNIT,
-      symbol: SYMBOL,
-    });
+  console.log(`Requesting proposal for ${selectedContractType}...`);
+  sendWhenReady({
+    proposal: 1,
+    amount: stake,
+    basis: "stake",
+    contract_type: selectedContractType,
+    currency: "USD",
+    duration: DURATION,
+    duration_unit: DURATION_UNIT,
+    symbol: SYMBOL,
   });
+  
+  
 }
 
 function handleProposal(data) {
   const echo = data.echo_req || {};
-  const contractType =
-    echo.contract_type || (echo.proposal && echo.proposal.contract_type);
-  if (!contractType) return;
+  const contractType = echo.contract_type || (echo.proposal && echo.proposal.contract_type);
+  if (!contractType || contractType !== selectedContractType) return;
   const proposalId = data.proposal && data.proposal.id;
   if (!proposalId) return;
   contracts[contractType] = proposalId;
   console.log(`Proposal received for ${contractType} → id=${proposalId}`);
-  if (contracts.CALL && contracts.PUT && !buyInProgress) {
+  if (!buyInProgress) {
     buyInProgress = true;
-    console.log("Both proposals present — buying CALL and PUT...");
-    ["CALL", "PUT"].forEach((type) => {
-      sendWhenReady({ buy: contracts[type], price: stake });
-    });
+    console.log(`Buying ${contractType}...`);
+    sendWhenReady({ buy: contracts[contractType], price: stake });
   }
 }
 
@@ -229,19 +228,8 @@ function handleBuy(data) {
   if (!buyRes) return;
   const contractId = buyRes.contract_id;
   if (!contractId) return;
-  const echoBuy = data.echo_req && data.echo_req.buy;
-  let typeFound = null;
-  if (echoBuy) {
-    if (echoBuy === contracts.CALL) typeFound = "CALL";
-    else if (echoBuy === contracts.PUT) typeFound = "PUT";
-  }
-  if (!typeFound) {
-    if (!activeContracts.CALL) typeFound = "CALL";
-    else if (!activeContracts.PUT) typeFound = "PUT";
-    else typeFound = "UNKNOWN";
-  }
-  activeContracts[typeFound] = contractId;
-  console.log(`Trade opened: ${typeFound}, ID=${contractId}, stake=${stake}`);
+  activeContracts[selectedContractType] = contractId;
+  console.log(`Trade opened: ${selectedContractType}, ID=${contractId}, stake=${stake}`);
   sendWhenReady({
     proposal_open_contract: 1,
     contract_id: contractId,
@@ -258,21 +246,18 @@ function handlePOC(data) {
   console.log(`POC ${type} profit=${profit.toFixed(2)} sold=${isSold}`);
   if (isSold) {
     results[type] = profit;
-    if (results.CALL !== null && results.PUT !== null) {
-      evaluateFinal();
-    }
+    evaluateFinal();
   }
 }
 
 function evaluateFinal() {
-  const net = (results.CALL || 0) + (results.PUT || 0);
-  console.log(`Final results → NET=${net}`);
+  const net = results[selectedContractType] || 0;
+  console.log(`Final result → NET=${net}`);
   if (net > 0) {
     console.log("✅ Profitable! Exiting.");
-    ws.close();
   } else {
     console.log("❌ Loss. Exiting.");
     stake = BASE_STAKE;
-    ws.close();
   }
+  resetCycle();
 }
