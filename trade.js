@@ -24,7 +24,7 @@ ws.onmessage=e=>{
   let d=JSON.parse(e.data);if(d.error)return console.error("❌",d.error.message);
   switch(d.msg_type){
     case"history":ticks=d.history.prices.map((p,i)=>({epoch:d.history.times[i],quote:p}));console.log(`📊 Hx=${ticks.length}`);checkEntry();break;
-    case"tick":ticks.push({epoch:d.tick.epoch,quote:d.tick.quote});if(ticks.length>HISTORY)ticks.shift();console.log(`💹 Tk=${d.tick.quote}`);if(!tradeReady)checkEntry();break;
+    case"tick": ticks.push({epoch:d.tick.epoch,quote:d.tick.quote});if(ticks.length>HISTORY)ticks.shift();console.log(`💹 Tk=${d.tick.quote}`);if(!tradeReady)checkEntry();break;
     case"authorize":isAuth=true;console.log("🔑 Auth");send({profit_table:1,limit:2,sort:"DESC"});break;
     case"profit_table":console.log("📑 PT");stake=BASE_STAKE;requestProps();break;
     case"proposal":let t=d.echo_req.contract_type,id=d.proposal?.id;if(t&&id){contracts[t]=id;console.log(`📜 Prop ${t}=${id}`);if(contracts.CALL&&contracts.PUT&&!buying){buying=true;["CALL","PUT"].forEach(x=>send({buy:contracts[x],price:stake}));}}break;
@@ -49,15 +49,28 @@ function checkEntry(){
 
   console.log(`🔎 tomRed=${tomRed} tomGreen=${tomGreen} | vols=${vols.map(v=>v.toFixed(2))} avg=${avg.toFixed(2)} min=${min.toFixed(2)}`);
 
-  if(tom&&vol){
+  if(true|| tom&&vol){
     console.log("🚀 Entry");
     tradeReady=true;
     if(!isAuth)send({authorize:TOKEN});else if(!gotProps)send({profit_table:1,limit:2,sort:"DESC"});
-  } else if(!subTicks){send({ticks:SYMBOL,subscribe:1});subTicks=true;}
+  } 
+   if(!subTicks){send({ticks:SYMBOL,subscribe:1});subTicks=true;}
 }
 
 /* === Proposals === */
 function requestProps(){if(gotProps)return;gotProps=true;reset();["CALL","PUT"].forEach(x=>send({proposal:1,amount:stake,basis:"stake",contract_type:x,currency:"USD",duration:DURATION,duration_unit:UNIT,symbol:SYMBOL}));}
 
-/* === Final eval === */
-function final(){let net=(results.CALL||0)+(results.PUT||0);console.log(`${net>0?"✅":"❌"} NET=${net}`);stake=BASE_STAKE;ws.close();}
+/* === Final eval with Martingale === */
+function final(){ 
+  let net=(results.CALL||0)+(results.PUT||0); 
+  if(net>0){ 
+    console.log(`✅ NET=${net.toFixed(2)} | Reset to base`); 
+    stake=BASE_STAKE; 
+    return;// ws.close();
+  } else { 
+    console.log(`❌ NET=${net.toFixed(2)} | Martingale applied`); 
+   if(stake<30) stake*=5; else return console.log("Ending trade Cycle");
+  } 
+  reset(); 
+  requestProps(); 
+}
