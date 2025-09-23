@@ -1,11 +1,13 @@
 // TRADERXY MERGED — requires BOTH tom pattern + volatility to enter
-const APP_ID=1089,TOKEN="1Ej5Kd5yebuR6LN",SYMBOL="stpRNG";
-const BASE_STAKE=0.5,DURATION=15,UNIT="s",HISTORY=46;
-const MODE= "reversion";
+const APP_ID=1089,TOKEN="tUgDTQ6ZclOuNBl",SYMBOL="stpRNG";
+const BASE_STAKE=1,DURATION=15,UNIT="s";
+const CANDLE_COUNT=4; // set to 3 or 4
+const HISTORY=CANDLE_COUNT*15+1;
+const MODE="reversion";
 
 const WS_URL=`wss://ws.derivws.com/websockets/v3?app_id=${APP_ID}`;
 const WSClass=globalThis.WebSocket||(typeof require!=="undefined"&&require("ws"));
-if(!WSClass)throw new Error("No WebSocket"); 
+if(!WSClass)throw new Error("No WebSocket");
 let ws=new WSClass(WS_URL);
 
 /* === State === */
@@ -24,7 +26,7 @@ ws.onmessage=e=>{
   let d=JSON.parse(e.data);if(d.error)return console.error("❌",d.error.message);
   switch(d.msg_type){
     case"history":ticks=d.history.prices.map((p,i)=>({epoch:d.history.times[i],quote:p}));console.log(`📊 Hx=${ticks.length}`);checkEntry();break;
-    case"tick": ticks.push({epoch:d.tick.epoch,quote:d.tick.quote});if(ticks.length>HISTORY)ticks.shift();console.log(`💹 Tk=${d.tick.quote}`);if(!tradeReady)checkEntry();break;
+    case"tick":ticks.push({epoch:d.tick.epoch,quote:d.tick.quote});if(ticks.length>HISTORY)ticks.shift();console.log(`💹 Tk=${d.tick.quote}`);if(!tradeReady)checkEntry();break;
     case"authorize":isAuth=true;console.log("🔑 Auth");send({profit_table:1,limit:2,sort:"DESC"});break;
     case"profit_table":console.log("📑 PT");stake=BASE_STAKE;requestProps();break;
     case"proposal":let t=d.echo_req.contract_type,id=d.proposal?.id;if(t&&id){contracts[t]=id;console.log(`📜 Prop ${t}=${id}`);if(contracts.CALL&&contracts.PUT&&!buying){buying=true;["CALL","PUT"].forEach(x=>send({buy:contracts[x],price:stake}));}}break;
@@ -35,42 +37,36 @@ ws.onmessage=e=>{
 
 /* === Entry check === */
 function checkEntry(){
-  let c=candles(ticks);if(c.length<3)return;
-  let [c1,c2,c3]=c.slice(-3),
-    tomRed=c1.c>Math.max(c2.h,c3.h),
-    tomGreen=c1.c<Math.min(c2.l,c3.l),
-    tom=tomRed||tomGreen,
-    vols=c.slice(-3).map(x=>Math.abs(x.c-x.o)),
-    avg=vols.reduce((a,b)=>a+b)/3,
+  let c=candles(ticks);if(c.length<CANDLE_COUNT)return;
+  let last=c.slice(-CANDLE_COUNT),
+    vols=last.map(x=>Math.abs(x.c-x.o)),
+    avg=vols.reduce((a,b)=>a+b)/vols.length,
     min=Math.min(...vols),
-    vol=(avg>0.4&&min>0.29);
-      if (MODE== "reversion"){vol= avg==0;tom=true; console.log("MODE MEAN REVERSION");}
-      
+    vol=avg==0;
 
-  console.log(`🔎 tomRed=${tomRed} tomGreen=${tomGreen} | vols=${vols.map(v=>v.toFixed(2))} avg=${avg.toFixed(2)} min=${min.toFixed(2)}`);
+  console.log(`🔎 vols=${vols.map(v=>v.toFixed(2))} avg=${avg.toFixed(2)} min=${min.toFixed(2)} using=${CANDLE_COUNT}`);
 
-  if(true|| tom&&vol){
+  if(vol){
     console.log("🚀 Entry");
     tradeReady=true;
     if(!isAuth)send({authorize:TOKEN});else if(!gotProps)send({profit_table:1,limit:2,sort:"DESC"});
-  } 
-   if(!subTicks){send({ticks:SYMBOL,subscribe:1});subTicks=true;}
+  }
+  if(!subTicks){send({ticks:SYMBOL,subscribe:1});subTicks=true;}
 }
 
 /* === Proposals === */
 function requestProps(){if(gotProps)return;gotProps=true;reset();["CALL","PUT"].forEach(x=>send({proposal:1,amount:stake,basis:"stake",contract_type:x,currency:"USD",duration:DURATION,duration_unit:UNIT,symbol:SYMBOL}));}
 
 /* === Final eval with Martingale === */
-function final(){ 
-  let net=(results.CALL||0)+(results.PUT||0); 
-  if(net>0){ 
-    console.log(`✅ NET=${net.toFixed(2)} | Reset to base`); 
-    stake=BASE_STAKE; 
+function final(){
+  let net=(results.CALL||0)+(results.PUT||0);
+  if(net>0){
+    console.log(`✅ NET=${net.toFixed(2)} | Reset to base`);
+    stake=BASE_STAKE;
     return;// ws.close();
-  } else { 
-    console.log(`❌ NET=${net.toFixed(2)} | Martingale applied`); 
-   if(stake<(30*BASE_STAKE)) stake*=5; else return console.log("Ending trade Cycle");
-  } 
-  reset(); 
-  requestProps(); 
+  } else {
+    console.log(`❌ NET=${net.toFixed(2)} | Martingale applied`);
+  }
+  reset();
+  requestProps();
 }
