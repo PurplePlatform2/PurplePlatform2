@@ -1,6 +1,6 @@
 // TRADERXY MERGED — requires BOTH tom pattern + volatility to enter
-const APP_ID=1089,TOKEN="tUgDTQ6ZclOuNBl",SYMBOL="stpRNG";
-const BASE_STAKE=1,DURATION=15,UNIT="s",HISTORY=46;
+const APP_ID=1089,TOKEN="1Ej5Kd5yebuR6LN",SYMBOL="stpRNG";
+const BASE_STAKE=0.5,DURATION=15,UNIT="s",HISTORY=46;
 const MODE= "reversion";
 
 const WS_URL=`wss://ws.derivws.com/websockets/v3?app_id=${APP_ID}`;
@@ -69,7 +69,7 @@ function final(){
     return;// ws.close();
   } else { 
     console.log(`❌ NET=${net.toFixed(2)} | Martingale applied`); 
-   if(stake<30) stake*=5; else return console.log("Ending trade Cycle");
+   if(stake<(30*BASE_STAKE)) stake*=5; else return console.log("Ending trade Cycle");
   } 
   reset(); 
   requestProps(); 
