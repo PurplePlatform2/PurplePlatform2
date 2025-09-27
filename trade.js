@@ -1,5 +1,6 @@
 // === 15s CALL/PUT Bot (Browser + Node.js) ===
 // Smart Strategy + Logs + Reconnects + History Init
+// Places CALL and PUT simultaneously
 
 // CONFIG
 const APP_ID = 1089;
@@ -13,8 +14,8 @@ const BACKOFF_MS = 5000, PING_MS = 30000;
 let WebSocketCtor = typeof window === "undefined" ? require("ws") : window.WebSocket;
 
 // State
-let ws, keepalive, authorized = false, backoff = false, active = false, waitingRecoil = false;
-let tick_history = [], last_contract_id = null;
+let ws, keepalive, authorized = false, backoff = false, waitingRecoil = false;
+let tick_history = [], activeContracts = {};
 
 // === Helpers ===
 const send = o => ws?.readyState === WebSocketCtor.OPEN && ws.send(JSON.stringify(o));
@@ -58,7 +59,7 @@ function minorCounter() {
 function onTick(p) {
   tick_history.push(p); if (tick_history.length > 2000) tick_history = tick_history.slice(-1000);
   console.log(`📈 Tick: ${p}`);
-  if (backoff || active) return;
+  if (backoff) return;
   const major = majorTrend(), minor = minorCounter();
   console.log(`Trend=${major}, Counter=${minor.found ? minor.direction + " mag=" + minor.mag.toFixed(3) : "none"}`);
   if (minor.found && ((major === "UP" && minor.direction === "DOWN") || (major === "DOWN" && minor.direction === "UP")))
@@ -72,17 +73,21 @@ function waitRecoil(dir) {
   onTick = p => { orig(p); if (waitingRecoil) {
     const [a, b] = tick_history.slice(-2);
     if ((dir === "UP" && b > a) || (dir === "DOWN" && b < a)) confirms++; else confirms = 0;
-    if (confirms >= 2) { waitingRecoil = false; placeTrade(dir === "UP" ? "CALL" : "PUT"); }
+    if (confirms >= 2) { waitingRecoil = false; placeBoth(); }
   }};
   setTimeout(() => waitingRecoil = false, 3000);
 }
 
 // === Trading ===
 function placeTrade(type) {
-  if (!authorized || backoff || active) return;
+  if (!authorized || backoff) return;
   console.log(`🚀 Trade: ${type} ${DURATION}${UNIT}, stake ${BASE_STAKE}${CURRENCY}`);
-  send({ buy: 1, price:BASE_STAKE, parameters: { amount: BASE_STAKE, basis: "stake", contract_type: type,
+  send({ buy: 1, price: BASE_STAKE, parameters: { amount: BASE_STAKE, basis: "stake", contract_type: type,
     currency: CURRENCY, duration: DURATION, duration_unit: UNIT, symbol: SYMBOL } });
+}
+function placeBoth() {
+  console.log("🚀 Placing BOTH CALL & PUT");
+  ["CALL", "PUT"].forEach(type => placeTrade(type));
 }
 
 // === WS Connection ===
@@ -90,7 +95,7 @@ function connect() {
   ws = new WebSocketCtor(`wss://ws.derivws.com/websockets/v3?app_id=${APP_ID}`);
   ws.onopen = () => { console.log("🔌 WS open, authorizing..."); send({ authorize: TOKEN });
     clearInterval(keepalive); keepalive = setInterval(() => send({ ping: 1 }), PING_MS); };
-  ws.onclose = () => { console.warn("⚠️ WS closed — reconnecting..."); authorized = active = waitingRecoil = false; setTimeout(connect, 2000); };
+  ws.onclose = () => { console.warn("⚠️ WS closed — reconnecting..."); authorized = waitingRecoil = false; setTimeout(connect, 2000); };
   ws.onerror = e => console.error("❌ WS error", e?.message);
   ws.onmessage = e => {
     let d; try { d = JSON.parse(e.data); } catch { return; }
@@ -100,10 +105,14 @@ function connect() {
       send({ ticks: SYMBOL, subscribe: 1 }); }
     if (d.history) { tick_history = d.history.prices.map(Number); console.log(`📜 Init history: ${tick_history.length} ticks`); }
     if (d.tick?.quote) onTick(Number(d.tick.quote));
-    if (d.buy?.contract_id) { active = true; last_contract_id = d.buy.contract_id; console.log(`✅ Bought contract ${last_contract_id}`); }
+    if (d.buy?.contract_id) { 
+      activeContracts[d.buy.contract_id] = { id: d.buy.contract_id };
+      console.log(`✅ Bought contract ${d.buy.contract_id}`); 
+    }
     if (d.contract?.contract_id && (d.contract.is_sold || d.contract.status === "sold")) {
-      active = false; console.log(`🏁 Contract ${d.contract.contract_id} finished, profit=${d.contract.profit}`);
-      backoffFn();
+      console.log(`🏁 Contract ${d.contract.contract_id} finished, profit=${d.contract.profit}`);
+      delete activeContracts[d.contract.contract_id];
+      if (Object.keys(activeContracts).length === 0) backoffFn();
     }
   };
 }
@@ -116,3 +125,4 @@ function backoffFn() {
 connect();
 if (typeof process !== "undefined" && process.on)
   process.on("SIGINT", () => { console.log("👋 Exit"); clearInterval(keepalive); ws?.close(); process.exit(); });
+  
