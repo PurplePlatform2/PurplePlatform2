@@ -5,7 +5,7 @@ const WSClass = (typeof window !== "undefined" && window.WebSocket) ? window.Web
 const APP_ID = 1089;
 const TOKEN = "tUgDTQ6ZclOuNBl"; // 🔐 Replace with your token
 const SYMBOL = "stpRNG";
-const STAKE = 100, MULTIPLIER = 750, MAX_PROFIT = 0.5; // USD
+const STAKE = 1, MULTIPLIER = 750, MAX_PROFIT = 0.02; // USD
 
 /* === CONNECTION === */
 const ws = new WSClass(`wss://ws.derivws.com/websockets/v3?app_id=${APP_ID}`);
@@ -24,7 +24,7 @@ ws.onmessage = (msg) => {
       console.log("✅ Authorized:", data.authorize.loginid);
       ws.send(JSON.stringify({ portfolio: 1 }));
       ws.send(JSON.stringify({
-        ticks_history: SYMBOL, count: 10, granularity: 120,
+        ticks_history: SYMBOL, count: 10, granularity: 60,
         style: "candles", end: "latest", adjust_start_time: 1
       }));
       break;
@@ -70,8 +70,8 @@ ws.onmessage = (msg) => {
       console.log(`🔮 FractalUp:${f_up} FractalDown:${f_down}`);
       console.log(`📈 HigherHigh:${isHigherHigh} LowerLow:${isLowerLow}`);
 
-      if (isHigherHigh && closePct > 80 && f_up) placeTrade("MULTUP");
-      else if (isLowerLow && closePct < 20 && f_down) placeTrade("MULTDOWN");
+      if (isHigherHigh && closePct >= 80 && f_up) placeTrade("MULTUP");
+      else if (isLowerLow && closePct <= 20 && f_down) placeTrade("MULTDOWN");
       else console.log("⏸ No valid entry condition.");
       break;
     }
