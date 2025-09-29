@@ -1,104 +1,108 @@
-// TRADERXY.JS (15-tick candle version) — VolPrime entry
+/* === Multi-Contract Smart Multiplier Bot + True Fractals === */
+const WSClass = (typeof window !== "undefined" && window.WebSocket) ? window.WebSocket : require("ws");
 
-const APP_ID = 1089, TOKEN = "tUgDTQ6ZclOuNBl", SYMBOL = "stpRNG";
-const BASE_STAKE = 0.35, DURATION = 15, UNIT = "s", HISTORY_COUNT = 46;
-const WS_URL = `wss://ws.derivws.com/websockets/v3?app_id=${APP_ID}`;
-const WSClass = globalThis.WebSocket || (typeof require !== "undefined" ? require("ws") : null);
-if (!WSClass) throw new Error("WebSocket not found");
+/* === CONFIG === */
+const APP_ID = 1089;
+const TOKEN = "tUgDTQ6ZclOuNBl"; // 🔐 Replace with your token
+const SYMBOL = "stpRNG";
+const STAKE = 100, MULTIPLIER = 750, MAX_PROFIT = 0.5; // USD
 
-let ws = new WSClass(WS_URL), stake = BASE_STAKE;
-let contracts = {}, active = {}, results = {}, lastTicks = [];
-let tradeReady = false, isTickSub = false, isAuth = false, gotProposals = false, buying = false;
+/* === CONNECTION === */
+const ws = new WSClass(`wss://ws.derivws.com/websockets/v3?app_id=${APP_ID}`);
 
-const send = (m) => ws?.readyState === 1 ? ws.send(JSON.stringify(m)) : setTimeout(() => send(m), 100);
-const resetCycle = () => (contracts = {}, active = {}, results = {}, buying = false, gotProposals = false);
-const round2 = (n) => Math.round(n * 100) / 100;
-
-/* === Flow === */
 ws.onopen = () => {
-  console.log("Connected ✅");
-  send({ ticks_history: SYMBOL, count: HISTORY_COUNT, end: "latest", style: "ticks" });
+  console.log("🔌 Connecting...");
+  ws.send(JSON.stringify({ authorize: TOKEN }));
 };
 
 ws.onmessage = (msg) => {
-  const d = JSON.parse(msg.data); if (d.error) return console.error("Error:", d.error.message);
-  switch (d.msg_type) {
-    case "history":
-      lastTicks = d.history.prices.map((p, i) => ({ epoch: d.history.times[i], quote: p }));
-      console.log(`📊 Loaded ${lastTicks.length} ticks`); tryPatternAndTrade(); break;
-    case "tick": handleTick(d.tick); break;
-    case "authorize": console.log("Authorized ✅"); isAuth = true; requestProposals(); break;
-    case "proposal": handleProposal(d); break;
-    case "buy": handleBuy(d); break;
-    case "proposal_open_contract": handlePOC(d); break;
+  const data = JSON.parse(msg.data || msg);
+  if (data.error) return console.error("❌ Error:", data.error.message);
+
+  switch (data.msg_type) {
+    case "authorize":
+      console.log("✅ Authorized:", data.authorize.loginid);
+      ws.send(JSON.stringify({ portfolio: 1 }));
+      ws.send(JSON.stringify({
+        ticks_history: SYMBOL, count: 10, granularity: 120,
+        style: "candles", end: "latest", adjust_start_time: 1
+      }));
+      break;
+
+    case "portfolio":
+      (data.portfolio?.contracts || []).forEach(c => {
+        console.log(`📌 Managing contract ${c.contract_id}`);
+        ws.send(JSON.stringify({ proposal_open_contract: 1, contract_id: c.contract_id, subscribe: 1 }));
+      });
+      break;
+
+    case "candles": {
+      let candles = data.candles;
+      if (!candles || candles.length < 5) return;
+      candles = candles.slice(0, -1); // drop unfinished
+      if (candles.length < 5) return;
+
+      const last = candles.at(-1), prev1 = candles.at(-2), prev2 = candles.at(-3);
+      const high = +last.high, low = +last.low, close = +last.close;
+      const range = high - low, closePct = range ? ((close - low) / range) * 100 : null;
+
+      // ✅ Corrected entry logic
+      const isHigherHigh = close > prev1.high && close > prev2.high;
+      const isLowerLow = close < prev1.low && close < prev2.low;
+
+      // --- 🔮 True Bill Williams Fractals ---
+      const midIndex = candles.length - 3, mid = candles[midIndex];
+      if (midIndex < 2) return;
+
+      const f_up =
+        mid.high > candles[midIndex - 2].high &&
+        mid.high > candles[midIndex - 1].high &&
+        mid.high > candles[midIndex + 1].high &&
+        mid.high > candles[midIndex + 2].high;
+
+      const f_down =
+        mid.low < candles[midIndex - 2].low &&
+        mid.low < candles[midIndex - 1].low &&
+        mid.low < candles[midIndex + 1].low &&
+        mid.low < candles[midIndex + 2].low;
+
+      console.log(`📊 H:${high} L:${low} C:${close} %:${closePct?.toFixed(2)}`);
+      console.log(`🔮 FractalUp:${f_up} FractalDown:${f_down}`);
+      console.log(`📈 HigherHigh:${isHigherHigh} LowerLow:${isLowerLow}`);
+
+      if (isHigherHigh && closePct > 80 && f_up) placeTrade("MULTUP");
+      else if (isLowerLow && closePct < 20 && f_down) placeTrade("MULTDOWN");
+      else console.log("⏸ No valid entry condition.");
+      break;
+    }
+
+    case "buy":
+      console.log("✅ Bought contract:", data.buy.contract_id);
+      ws.send(JSON.stringify({
+        proposal_open_contract: 1,
+        contract_id: data.buy.contract_id,
+        subscribe: 1
+      }));
+      break;
+
+    case "proposal_open_contract": {
+      const poc = data.proposal_open_contract;
+      if (!poc) return;
+      console.log(`📈 Contract ${poc.contract_id} | PnL:${poc.profit} | ${poc.status}`);
+      if (poc.profit >= MAX_PROFIT && poc.status === "open") {
+        console.log(`🛑 Closing ${poc.contract_id} (profit ${poc.profit})`);
+        ws.send(JSON.stringify({ sell: poc.contract_id, price: 0 }));
+      }
+      if (poc.status !== "open") console.log(`🏁 Closed ${poc.contract_id}. Final PnL:${poc.profit}`);
+      break;
+    }
   }
 };
 
-/* === Build 15-tick candles === */
-const buildCandles = (ticks) => {
-  const c = [];
-  for (let i = 0; i + 14 < ticks.length; i += 15) {
-    const s = ticks.slice(i, i + 15), o = s[0].quote, cl = s[s.length - 1].quote;
-    c.push({ open: o, close: cl, high: Math.max(...s.map(t => t.quote)), low: Math.min(...s.map(t => t.quote)) });
-  }
-  return c;
-};
-
-/* === Entry Condition: VolPrime === */
-function tryPatternAndTrade() {
-  const c = buildCandles(lastTicks);
-  if (!c.length) return console.log("Not enough candles");
-  const { high, low } = c[c.length - 1], range = round2(high - low);
-  console.log(`VolPrime check → high=${high}, low=${low}, range=${range}`);
-  if (range <= 0.2) {
-    console.log("🚀 VolPrime triggered → CALL+PUT");
-    tradeReady = true;
-    if (!isAuth) send({ authorize: TOKEN }); else if (!gotProposals) requestProposals();
-  } else if (!isTickSub) {
-    console.log("No VolPrime yet → subscribing ticks...");
-    send({ ticks: SYMBOL, subscribe: 1 }); isTickSub = true;
-  }
-}
-
-/* === Tick Handling === */
-function handleTick(tick) {
-  lastTicks.push({ epoch: tick.epoch, quote: tick.quote });
-  if (lastTicks.length > HISTORY_COUNT) lastTicks.shift();
-  console.log(`💹 Tick: ${tick.quote}`);
-  if (!tradeReady && lastTicks.length >= HISTORY_COUNT) tryPatternAndTrade();
-}
-
-/* === Proposals & Buying === */
-function requestProposals() {
-  if (gotProposals) return; gotProposals = true; resetCycle();
-  ["CALL", "PUT"].forEach(type => send({
-    proposal: 1, amount: stake, basis: "stake", contract_type: type,
-    currency: "USD", duration: DURATION, duration_unit: UNIT, symbol: SYMBOL
+function placeTrade(type) {
+  console.log(`🚀 Placing ${type} trade...`);
+  ws.send(JSON.stringify({
+    buy: 1, price: STAKE,
+    parameters: { amount: STAKE, basis: "stake", contract_type: type, currency: "USD", multiplier: MULTIPLIER, symbol: SYMBOL }
   }));
-}
-function handleProposal(d) {
-  const t = d.echo_req?.contract_type, id = d.proposal?.id; if (!t || !id) return;
-  contracts[t] = id; console.log(`Proposal ${t} → id=${id}`);
-  if (contracts.CALL && contracts.PUT && !buying) {
-    buying = true; console.log("Buying CALL+PUT...");
-    ["CALL", "PUT"].forEach(t => send({ buy: contracts[t], price: stake }));
-  }
-}
-function handleBuy(d) {
-  const id = d.buy?.contract_id; if (!id) return;
-  const e = d.echo_req?.buy, t = e === contracts.CALL ? "CALL" : e === contracts.PUT ? "PUT" : (!active.CALL ? "CALL" : "PUT");
-  active[t] = id; console.log(`Trade opened: ${t}, ID=${id}, stake=${stake}`);
-  send({ proposal_open_contract: 1, contract_id: id, subscribe: 1 });
-}
-function handlePOC(d) {
-  const p = d.proposal_open_contract; if (!p) return;
-  const t = p.contract_type, profit = +p.profit, sold = !!p.is_sold;
-  console.log(`POC ${t} profit=${profit.toFixed(2)} sold=${sold}`);
-  if (sold) { results[t] = profit; if (results.CALL != null && results.PUT != null) evaluateFinal(); }
-}
-function evaluateFinal() {
-  const net = (results.CALL || 0) + (results.PUT || 0);
-  console.log(`Final results → NET=${net}`);
-  console.log(net > 0 ? "✅ Profitable! Exiting." : "❌ Loss. Exiting.");
-  stake = BASE_STAKE; ws.close();
 }
