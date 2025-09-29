@@ -1,7 +1,7 @@
 // TRADERXY.JS (15-tick candle version) — VolPrime entry
 
 const APP_ID = 1089, TOKEN = "tUgDTQ6ZclOuNBl", SYMBOL = "stpRNG";
-const BASE_STAKE = 0.35 DURATION = 15, UNIT = "s", HISTORY_COUNT = 46;
+const BASE_STAKE = 0.35, DURATION = 15, UNIT = "s", HISTORY_COUNT = 46;
 const WS_URL = `wss://ws.derivws.com/websockets/v3?app_id=${APP_ID}`;
 const WSClass = globalThis.WebSocket || (typeof require !== "undefined" ? require("ws") : null);
 if (!WSClass) throw new Error("WebSocket not found");
