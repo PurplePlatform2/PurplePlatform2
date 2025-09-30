@@ -24,7 +24,7 @@ ws.onmessage = (msg) => {
       console.log("✅ Authorized:", data.authorize.loginid);
       ws.send(JSON.stringify({ portfolio: 1 }));
       ws.send(JSON.stringify({
-        ticks_history: SYMBOL, count: 10, granularity: 60,
+        ticks_history: SYMBOL, count: 100, granularity: 60,
         style: "candles", end: "latest", adjust_start_time: 1
       }));
       break;
@@ -38,33 +38,33 @@ ws.onmessage = (msg) => {
 
     case "candles": {
       let candles = data.candles;
-      if (!candles || candles.length < 5) return;
-      candles = candles.slice(0, -1); // drop unfinished
-      if (candles.length < 5) return;
+      if (!candles || candles.length < 6) return;
 
-      const last = candles.at(-1), prev1 = candles.at(-2), prev2 = candles.at(-3);
-      const high = +last.high, low = +last.low, close = +last.close;
+      candles = candles.slice(0, -1); // drop unfinished
+      const last5 = candles.slice(-5); // work only with the latest 5 completed candles
+      if (last5.length < 5) return;
+
+      const [c1, c2, c3, c4, c5] = last5;
+      const high = +c5.high, low = +c5.low, close = +c5.close;
       const range = high - low, closePct = range ? ((close - low) / range) * 100 : null;
 
-      // ✅ Corrected entry logic
-      const isHigherHigh = close > prev1.high && close > prev2.high;
-      const isLowerLow = close < prev1.low && close < prev2.low;
+      // ✅ Higher-high / Lower-low checks
+      const isHigherHigh = c5.high > c4.high && c5.high > c3.high;
+      const isLowerLow = c5.low < c4.low && c5.low < c3.low;
 
       // --- 🔮 True Bill Williams Fractals ---
-      const midIndex = candles.length - 3, mid = candles[midIndex];
-      if (midIndex < 2) return;
-
+      const mid = c3; // 3rd candle in last5 is the middle
       const f_up =
-        mid.high > candles[midIndex - 2].high &&
-        mid.high > candles[midIndex - 1].high &&
-        mid.high > candles[midIndex + 1].high &&
-        mid.high > candles[midIndex + 2].high;
+        mid.high > c1.high &&
+        mid.high > c2.high &&
+        mid.high > c4.high &&
+        mid.high > c5.high;
 
       const f_down =
-        mid.low < candles[midIndex - 2].low &&
-        mid.low < candles[midIndex - 1].low &&
-        mid.low < candles[midIndex + 1].low &&
-        mid.low < candles[midIndex + 2].low;
+        mid.low < c1.low &&
+        mid.low < c2.low &&
+        mid.low < c4.low &&
+        mid.low < c5.low;
 
       console.log(`📊 H:${high} L:${low} C:${close} %:${closePct?.toFixed(2)}`);
       console.log(`🔮 FractalUp:${f_up} FractalDown:${f_down}`);
@@ -103,6 +103,10 @@ function placeTrade(type) {
   console.log(`🚀 Placing ${type} trade...`);
   ws.send(JSON.stringify({
     buy: 1, price: STAKE,
-    parameters: { amount: STAKE, basis: "stake", contract_type: type, currency: "USD", multiplier: MULTIPLIER, symbol: SYMBOL }
+    parameters: {
+      amount: STAKE, basis: "stake",
+      contract_type: type, currency: "USD",
+      multiplier: MULTIPLIER, symbol: SYMBOL
+    }
   }));
 }
