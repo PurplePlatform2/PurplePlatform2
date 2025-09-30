@@ -1,4 +1,4 @@
-/* === Multi-Contract Smart Multiplier Bot + True Fractals === */
+/* === Multi-Contract Smart Multiplier Bot + True Fractals + Trend Strength === */
 const WSClass = (typeof window !== "undefined" && window.WebSocket) ? window.WebSocket : require("ws");
 
 /* === CONFIG === */
@@ -23,10 +23,7 @@ ws.onmessage = (msg) => {
     case "authorize":
       console.log("✅ Authorized:", data.authorize.loginid);
       ws.send(JSON.stringify({ portfolio: 1 }));
-      ws.send(JSON.stringify({
-        ticks_history: SYMBOL, count: 100, granularity: 60,
-        style: "candles", end: "latest", adjust_start_time: 1
-      }));
+      requestCandles();
       break;
 
     case "portfolio":
@@ -41,12 +38,23 @@ ws.onmessage = (msg) => {
       if (!candles || candles.length < 6) return;
 
       candles = candles.slice(0, -1); // drop unfinished
-      const last5 = candles.slice(-5); // work only with the latest 5 completed candles
+      const last5 = candles.slice(-5);
       if (last5.length < 5) return;
 
       const [c1, c2, c3, c4, c5] = last5;
       const high = +c5.high, low = +c5.low, close = +c5.close;
       const range = high - low, closePct = range ? ((close - low) / range) * 100 : null;
+
+      // 🔮 Trend Strength (0–100) using RSI-like calc on 100 candles
+      const closes = candles.map(c => +c.close);
+      let gains = 0, losses = 0;
+      for (let i = 1; i < closes.length; i++) {
+        const diff = closes[i] - closes[i - 1];
+        if (diff > 0) gains += diff;
+        else losses -= diff;
+      }
+      const rs = losses ? gains / losses : 100;
+      const trendStrength = 100 - (100 / (1 + rs));
 
       // ✅ Higher-high / Lower-low checks
       const isHigherHigh = c5.high > c4.high && c5.high > c3.high;
@@ -66,13 +74,16 @@ ws.onmessage = (msg) => {
         mid.low < c4.low &&
         mid.low < c5.low;
 
-      console.log(`📊 H:${high} L:${low} C:${close} %:${closePct?.toFixed(2)}`);
+      console.log(`📊 H:${high} L:${low} C:${close} %:${closePct?.toFixed(2)} | 📈 Trend:${trendStrength.toFixed(1)}`);
       console.log(`🔮 FractalUp:${f_up} FractalDown:${f_down}`);
       console.log(`📈 HigherHigh:${isHigherHigh} LowerLow:${isLowerLow}`);
 
       if (isHigherHigh && closePct >= 80 && f_up) placeTrade("MULTUP");
       else if (isLowerLow && closePct <= 20 && f_down) placeTrade("MULTDOWN");
-      else console.log("⏸ No valid entry condition.");
+      else {
+        console.log("⏸ No valid entry condition. Retrying in 60s...");
+        setTimeout(requestCandles, 60000);
+      }
       break;
     }
 
@@ -108,5 +119,16 @@ function placeTrade(type) {
       contract_type: type, currency: "USD",
       multiplier: MULTIPLIER, symbol: SYMBOL
     }
+  }));
+}
+
+function requestCandles() {
+  ws.send(JSON.stringify({
+    ticks_history: SYMBOL,
+    count: 100,
+    granularity: 60,
+    style: "candles",
+    end: "latest",
+    adjust_start_time: 1
   }));
 }
