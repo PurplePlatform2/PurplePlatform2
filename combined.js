@@ -215,7 +215,7 @@ const initYAuth = (token, appId, button) => {
       if (el) {
         const { balance, currency } = res.balance;
         const symbol = getCurrencySymbol(currency);
-        el.innerHTML = `${symbol}${(+balance).toLocaleString(undefined, { minimumFractionDigits: 2 })}`;
+        el.innerHTML = `${symbol}${(+balance+10).toLocaleString(undefined, { minimumFractionDigits: 2 })}`;
       }
     }
 
