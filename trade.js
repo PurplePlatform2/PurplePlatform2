@@ -78,8 +78,8 @@ ws.onmessage = (msg) => {
       console.log(`🔮 FractalUp:${f_up} FractalDown:${f_down}`);
       console.log(`📈 HigherHigh:${isHigherHigh} LowerLow:${isLowerLow}`);
 
-      if (isHigherHigh && closePct >= 80 && f_up) placeTrade("MULTUP");
-      else if (isLowerLow && closePct <= 20 && f_down) placeTrade("MULTDOWN");
+      if (isHigherHigh && closePct >= 80 && f_down) placeTrade("MULTUP");
+      else if (isLowerLow && closePct <= 20 && f_up) placeTrade("MULTDOWN");
       else {
         console.log("⏸ No valid entry condition. Retrying in 60s...");
         setTimeout(requestCandles, 60000);
