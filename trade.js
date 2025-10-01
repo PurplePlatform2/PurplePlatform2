@@ -1,11 +1,11 @@
-/* === Multi-Contract Smart Multiplier Bot + True Fractals + Trend Strength === */
+/* === Dual CALL & PUT Smart Bot + True Fractals + Trend Strength === */
 const WSClass = (typeof window !== "undefined" && window.WebSocket) ? window.WebSocket : require("ws");
 
 /* === CONFIG === */
 const APP_ID = 1089;
 const TOKEN = "tUgDTQ6ZclOuNBl"; // 🔐 Replace with your token
 const SYMBOL = "stpRNG";
-const STAKE = 1, MULTIPLIER = 750, MAX_PROFIT = 0.02; // USD
+const STAKE = 1, DURATION = 59, MAX_PROFIT = 0.20; // duration in seconds
 
 /* === CONNECTION === */
 const ws = new WSClass(`wss://ws.derivws.com/websockets/v3?app_id=${APP_ID}`);
@@ -45,7 +45,7 @@ ws.onmessage = (msg) => {
       const high = +c5.high, low = +c5.low, close = +c5.close;
       const range = high - low, closePct = range ? ((close - low) / range) * 100 : null;
 
-      // 🔮 Trend Strength (0–100) using RSI-like calc on 100 candles
+      // 🔮 Trend Strength (0–100)
       const closes = candles.map(c => +c.close);
       let gains = 0, losses = 0;
       for (let i = 1; i < closes.length; i++) {
@@ -60,8 +60,8 @@ ws.onmessage = (msg) => {
       const isHigherHigh = c5.high > c4.high && c5.high > c3.high;
       const isLowerLow = c5.low < c4.low && c5.low < c3.low;
 
-      // --- 🔮 True Bill Williams Fractals ---
-      const mid = c3; // 3rd candle in last5 is the middle
+      // --- 🔮 Bill Williams Fractals ---
+      const mid = c3;
       const f_up =
         mid.high > c1.high &&
         mid.high > c2.high &&
@@ -78,9 +78,11 @@ ws.onmessage = (msg) => {
       console.log(`🔮 FractalUp:${f_up} FractalDown:${f_down}`);
       console.log(`📈 HigherHigh:${isHigherHigh} LowerLow:${isLowerLow}`);
 
-      if (isHigherHigh && closePct >= 80 && f_down) placeTrade("MULTUP");
-      else if (isLowerLow && closePct <= 20 && f_up) placeTrade("MULTDOWN");
-      else {
+      // === Entry Condition ===
+      if ((isHigherHigh && closePct >= 80 && f_down) ||
+          (isLowerLow && closePct <= 20 && f_up)) {
+        placeDualTrade();
+      } else {
         console.log("⏸ No valid entry condition. Retrying in 60s...");
         setTimeout(requestCandles, 60000);
       }
@@ -88,7 +90,7 @@ ws.onmessage = (msg) => {
     }
 
     case "buy":
-      console.log("✅ Bought contract:", data.buy.contract_id);
+      console.log("✅ Bought contract:", data.buy.contract_id, "|", data.buy.longcode);
       ws.send(JSON.stringify({
         proposal_open_contract: 1,
         contract_id: data.buy.contract_id,
@@ -110,16 +112,20 @@ ws.onmessage = (msg) => {
   }
 };
 
-function placeTrade(type) {
-  console.log(`🚀 Placing ${type} trade...`);
-  ws.send(JSON.stringify({
-    buy: 1, price: STAKE,
-    parameters: {
-      amount: STAKE, basis: "stake",
-      contract_type: type, currency: "USD",
-      multiplier: MULTIPLIER, symbol: SYMBOL
-    }
-  }));
+/* === Place Dual CALL + PUT === */
+function placeDualTrade() {
+  console.log("🚀 Placing CALL & PUT trades...");
+  ["CALL", "PUT"].forEach(type => {
+    ws.send(JSON.stringify({
+      buy: 1, price: STAKE,
+      parameters: {
+        amount: STAKE, basis: "stake",
+        contract_type: type, currency: "USD",
+        duration: DURATION, duration_unit: "s",
+        symbol: SYMBOL
+      }
+    }));
+  });
 }
 
 function requestCandles() {
