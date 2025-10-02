@@ -8,7 +8,7 @@ const TOKEN = "tUgDTQ6ZclOuNBl"; // Replace with your API token
 const SYMBOL = "stpRNG"; // Market symbol
 const STAKE = 1; // stake in USD
 const DURATION = 59; // seconds
-const SMA_PERIOD = 10;
+const SMA_PERIOD = 20;
 const GRANULARITY = 60; // 1-min candles
 
 const ws = new WSClass(`wss://ws.derivws.com/websockets/v3?app_id=${APP_ID}`);
