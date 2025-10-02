@@ -1,20 +1,20 @@
-/* === Professional Candle Strategy: Engulfing + Momentum Confirmation === */
+/* === One-shot SMA Candle Bot (Node.js) === */
 
-// Use browser WebSocket if available, otherwise require("ws") for Node
 const WSClass = (typeof window !== "undefined" && window.WebSocket) ? window.WebSocket : require("ws");
 
 /* === CONFIG === */
 const APP_ID = 1089; // Replace with your App ID
 const TOKEN = "tUgDTQ6ZclOuNBl"; // Replace with your API token
 const SYMBOL = "stpRNG"; // Market symbol
-const STAKE = 0.35; // stake amount
+const STAKE = 1; // stake in USD
 const DURATION = 59; // seconds
+const SMA_PERIOD = 10;
+const GRANULARITY = 60; // 1-min candles
 
-// === WebSocket Connection ===
-const ws = new WSClass(`wss://ws.binaryws.com/websockets/v3?app_id=${APP_ID}`);
+const ws = new WSClass(`wss://ws.derivws.com/websockets/v3?app_id=${APP_ID}`);
 
 ws.onopen = () => {
-  console.log("Connected ✅");
+  console.log("✅ Connected to Deriv API");
   ws.send(JSON.stringify({ authorize: TOKEN }));
 };
 
@@ -23,60 +23,77 @@ ws.onmessage = (msg) => {
 
   if (data.error) {
     console.error("❌ Error:", data.error.message);
-    return;
+    ws.close();
+    process.exit(1);
   }
 
-  // === Step 1: Authorize and request candles ===
+  // === Authorized ===
   if (data.msg_type === "authorize") {
-    console.log("Authorized as:", data.authorize.loginid);
+    console.log("🔑 Authorized as:", data.authorize.loginid);
+
+    // Request 10 candles
     ws.send(JSON.stringify({
       ticks_history: SYMBOL,
       style: "candles",
-      count: 5,
+      count: SMA_PERIOD,
       end: "latest",
-      granularity: 60 // 1-minute candles
+      granularity: GRANULARITY
     }));
   }
 
-  // === Step 2: Evaluate entry condition ===
+  // === Got 10-candle history ===
   if (data.msg_type === "candles") {
     const candles = data.candles;
-    const c1 = candles[candles.length - 3]; // third last
-    const c2 = candles[candles.length - 2]; // second last (setup candle)
-    const c3 = candles[candles.length - 1]; // most recent closed
-
-    console.log("Last 3 Candles:", { c1, c2, c3 });
-
-    // Bearish Engulfing + Momentum Filter
-    const bearishEngulfing = (c2.close > c2.open) && (c3.open > c2.close) && (c3.close < c2.open);
-    const momentumFilter = (c3.close < c1.close); // confirms short-term weakness
-
-    if (bearishEngulfing && momentumFilter) {
-      console.log("✅ Entry Condition Met → PUT trade");
-
-      ws.send(JSON.stringify({
-        proposal: 1,
-        amount: STAKE,
-        basis: "stake",
-        contract_type: "PUT",
-        currency: "USD",
-        duration: DURATION,
-        duration_unit: "s",
-        symbol: SYMBOL
-      }));
-    } else {
-      console.log("⚠️ No valid entry, conditions not met.");
+    if (candles.length < SMA_PERIOD) {
+      console.log("⚠ Not enough candles");
+      ws.close();
+      process.exit(0);
     }
+
+    const sma = candles.reduce((sum, c) => sum + c.close, 0) / SMA_PERIOD;
+    const lastCandle = candles[candles.length - 1];
+
+    let tradeType = null;
+    if (lastCandle.close > sma) tradeType = "CALL";
+    else if (lastCandle.close < sma) tradeType = "PUT";
+
+    console.log(
+      `📊 Last Candle Close: ${lastCandle.close}, SMA(${SMA_PERIOD}): ${sma.toFixed(2)}`
+    );
+
+    if (!tradeType) {
+      console.log("⏸ No trade signal.");
+      ws.close();
+      process.exit(0);
+    }
+
+    console.log(`✅ Trade Signal: ${tradeType}`);
+
+    ws.send(JSON.stringify({
+      proposal: 1,
+      amount: STAKE,
+      basis: "stake",
+      contract_type: tradeType,
+      currency: "USD",
+      duration: DURATION,
+      duration_unit: "s",
+      symbol: SYMBOL
+    }));
   }
 
-  // === Step 3: Receive Proposal ===
-  if (data.msg_type === "proposal") {
-    console.log("Proposal received →", data.proposal.display_value);
+  // === Got Proposal ===
+  if (data.msg_type === "proposal" && data.proposal) {
+    console.log(
+      `📩 Proposal → ${data.proposal.contract_type} @ ${data.proposal.display_value}`
+    );
+
     ws.send(JSON.stringify({ buy: data.proposal.id, price: STAKE }));
   }
 
-  // === Step 4: Trade Confirmation ===
-  if (data.msg_type === "buy") {
-    console.log("📌 Trade Executed | Transaction ID:", data.buy.transaction_id);
+  // === Trade Bought ===
+  if (data.msg_type === "buy" && data.buy) {
+    console.log(`🎯 Bought ${data.buy.contract_type} | ID: ${data.buy.contract_id}`);
+    ws.close();
+    if (typeof window == "undefined")process.exit(0);
   }
 };
