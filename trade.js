@@ -12,10 +12,10 @@ const WSClass = typeof window !== "undefined" && window.WebSocket ? window.WebSo
 const APP_ID = 1089;
 const TOKEN = "tUgDTQ6ZclOuNBl"; // Replace with your Deriv token
 const SYMBOL = "RB100";
-const MULTIPLIER = 2000;
-const STAKE = 1000;
+const MULTIPLIER = 100;
+const STAKE = 1;
 const MAX_PROFIT = 0.01;
-const AUTO_CLOSE = true;
+const AUTO_CLOSE = false;
 const CANDLE_COUNT = 8;
 const GRANULARITY = 300; // seconds per candle
 
