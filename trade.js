@@ -15,7 +15,7 @@ const SYMBOL = "RB100";
 const MULTIPLIER = 100;
 const STAKE = 1;
 const MAX_PROFIT = 0.01;
-const AUTO_CLOSE = false;
+const AUTO_CLOSE = true;
 const CANDLE_COUNT = 8;
 const GRANULARITY = 300; // seconds per candle
 
