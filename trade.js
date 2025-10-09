@@ -1,307 +1,207 @@
-/* === 15-Tick Difference Strategy Bot (Improved) ===
-   - Single trade lock
-   - 15-tick difference rule + SMA confirmation
-   - Volatility filter (avoid flat markets)
-   - Adaptive stake (soft anti-martingale)
-   - Cooldown after each trade (default 30s)
-   - Hedge mode when 5 consecutive losses detected (×2 stake)
-   - Detailed logging, auto-reconnect, Node.js + Browser compatible
-*/
+// TRADERXY.JS — 15-tick candle version (range-based strategy)
 
-const WSClass = typeof window !== "undefined" && window.WebSocket ? window.WebSocket : require("ws");
-
-/* === CONFIG === */
 const APP_ID = 1089;
-const TOKEN = "tUgDTQ6ZclOuNBl"; // Replace with your API token
+const TOKEN = "tUgDTQ6ZclOuNBl";
 const SYMBOL = "stpRNG";
-let STAKE = 1;                 // base stake (USD)
-const DURATION = 15;           // seconds
-const PRICE_DIFF = 1.0;        // required difference for entry
-const COOLDOWN_MS = 30_000;    // cooldown after trade (ms)
-const HIST_LEN = 20;           // kept tick history length
-const SMA_SHORT = 5;
-const SMA_LONG = 15;
-const VOL_THRESHOLD = 0.3;     // minimal volatility (price units) to allow trading
-const PROFIT_TABLE_LIMIT = 5;  // how many last trades to check for losses -> hedge logic
+const BASE_STAKE = 0.35;
+const DURATION = 15;
+const DURATION_UNIT = "s";
+const HISTORY_COUNT = 46;
 
-/* === STATE === */
-let ws = null;
-let ticks = [];
-let authorized = false;
-let hedge = false;
-let tradeActive = false;
-let lastTradeId = null;
-let cooldown = false;
-let lossCountConsecutive = 0; // consecutive loss counter (local tracking)
-let reconnectTries = 0;
+const WS_URL = `wss://ws.derivws.com/websockets/v3?app_id=${APP_ID}`;
+const WSClass =
+  typeof globalThis !== "undefined" && globalThis.WebSocket
+    ? globalThis.WebSocket
+    : (typeof require !== "undefined" ? require("ws") : null);
+if (!WSClass) throw new Error("WebSocket not found.");
 
-/* === HELPERS === */
-const log = (...a) => console.log(`[${new Date().toLocaleTimeString()}]`, ...a);
+let ws = new WSClass(WS_URL);
 
-// Safe send (checks socket ready state)
-function sendSafe(obj) {
-  try {
-    const payload = JSON.stringify(obj);
-    if (ws && ws.readyState === ws.OPEN) {
-      ws.send(payload);
+/* === State === */
+let stake = BASE_STAKE;
+let contracts = { CALL: null, PUT: null };
+let activeContracts = { CALL: null, PUT: null };
+let results = { CALL: null, PUT: null };
+let lastTicks = [];
+let tradeReady = false;
+
+/* === Protection flags === */
+let isTickSubscribed = false;
+let isAuthorizeRequested = false;
+let proposalsRequested = false;
+let buyInProgress = false;
+
+/* === Helpers === */
+function sendWhenReady(msg) {
+  if (ws && ws.readyState === 1) ws.send(JSON.stringify(msg));
+  else setTimeout(() => sendWhenReady(msg), 100);
+}
+
+function resetCycle() {
+  contracts = { CALL: null, PUT: null };
+  activeContracts = { CALL: null, PUT: null };
+  results = { CALL: null, PUT: null };
+  buyInProgress = false;
+  proposalsRequested = false;
+}
+
+const cProfit = r => {
+  const t = typeof r === "string" ? JSON.parse("[" + r.replace(/^\[?|\]?$/g, "") + "]") : r;
+  const i = t.map(x => ({ profit: +(x.sell_price - x.buy_price).toFixed(2) }));
+  return { total: +i.reduce((s, x) => s + x.profit, 0).toFixed(2), stake: +(t.reduce((s, x) => s + x.buy_price, 0) / t.length).toFixed(2) };
+};
+
+/* === 15-tick candle builder === */
+function build15TickCandles(ticks) {
+  const candles = [];
+  for (let i = 0; i + 14 < ticks.length; i += 15) {
+    const slice = ticks.slice(i, i + 15);
+    const open = slice[0].quote;
+    const close = slice[slice.length - 1].quote;
+    const high = Math.max(...slice.map(t => t.quote));
+    const low = Math.min(...slice.map(t => t.quote));
+    candles.push({ open, high, low, close });
+  }
+  return candles;
+}
+
+/* === WebSocket Flow === */
+ws.onopen = () => {
+  console.log("Connected ✅");
+  sendWhenReady({ ticks_history: SYMBOL, count: HISTORY_COUNT, end: "latest", style: "ticks" });
+};
+
+ws.onmessage = (msg) => {
+  const data = JSON.parse(msg.data);
+  if (data.error) return console.error("Error:", data.error.message);
+
+  switch (data.msg_type) {
+    case "history":
+      lastTicks = data.history.prices.map((p, i) => ({ epoch: data.history.times[i], quote: p }));
+      console.log(`📊 Loaded ${lastTicks.length} ticks`);
+      tryRangePattern();
+      break;
+
+    case "tick":
+      lastTicks.push({ epoch: data.tick.epoch, quote: data.tick.quote });
+      if (lastTicks.length > HISTORY_COUNT) lastTicks.shift();
+      console.log(`💹 Tick: ${data.tick.quote}`);
+      if (!tradeReady) tryRangePattern();
+      break;
+
+    case "authorize":
+      console.log("Authorized ✅");
+      sendWhenReady({ profit_table: 1, description: 1, limit: 2, offset: 0, sort: "DESC" });
+      break;
+
+    case "profit_table":
+      const redeem = cProfit(data.profit_table.transactions);
+      console.log(`📒 Profit check → total=${redeem.total}`);
+      requestProposals();
+      break;
+
+    case "proposal":
+      handleProposal(data);
+      break;
+
+    case "buy":
+      handleBuy(data);
+      break;
+
+    case "proposal_open_contract":
+      handlePOC(data);
+      break;
+  }
+};
+
+/* === Core logic: range pattern === */
+function tryRangePattern() {
+  const candles = build15TickCandles(lastTicks);
+  if (candles.length < 3) return console.log("Not enough candles yet.");
+
+  const c2 = candles[candles.length - 2];
+  const c3 = candles[candles.length - 3];
+  const r2 = c2.high - c2.low;
+  const r3 = c3.high - c3.low;
+
+  console.log(`Range check → c2=${r2.toFixed(2)} c3=${r3.toFixed(2)}`);
+
+  if (r2 <= 0.3 && r3 <= 0.3) {
+    console.log("✅ Range condition met → preparing to trade.");
+    tradeReady = true;
+
+    if (!isAuthorizeRequested) {
+      sendWhenReady({ authorize: TOKEN });
+      isAuthorizeRequested = true;
     } else {
-      log("⚠️ Can't send, socket not open. Buffering not implemented. Payload:", obj);
+      sendWhenReady({ profit_table: 1, description: 1, limit: 2, offset: 0, sort: "DESC" });
     }
-  } catch (err) {
-    log("❌ sendSafe error:", err.message);
-  }
-}
-
-function sma(arr, len) {
-  if (!arr || arr.length < len) return null;
-  const slice = arr.slice(-len);
-  const sum = slice.reduce((s, v) => s + v, 0);
-  return sum / len;
-}
-
-function volatility(arr) {
-  if (!arr || arr.length < 2) return 0;
-  const min = Math.min(...arr);
-  const max = Math.max(...arr);
-  return max - min;
-}
-
-// Adaptive stake (soft anti-martingale)
-function updateStakeFromProfit(profit) {
-  if (profit > 0) {
-    lossCountConsecutive = 0;
-    STAKE = 1; // reset to base stake
   } else {
-    lossCountConsecutive++;
-    // increase stake gradually; cap at 3x base stake
-    STAKE = +(1 * Math.min(3, 1 + lossCountConsecutive * 0.5)).toFixed(2);
-  }
-  // Hedge mode when 5 or more consecutive losses (also synced from profit_table)
-  hedge = lossCountConsecutive >= 5;
-  log(`💵 Stake set to ${STAKE} | Consecutive losses: ${lossCountConsecutive} | Hedge: ${hedge ? "ON (×2)" : "OFF"}`);
-}
-
-// Recompute lossCountConsecutive from profit_table (fallback to robust detection)
-function recomputeLossesFromProfitTable(transactions = []) {
-  // transactions assumed from newest -> oldest or as provided by API
-  // find consecutive losses starting from the most recent
-  let consecutive = 0;
-  for (let i = 0; i < transactions.length; i++) {
-    const t = transactions[i];
-    if (t.profit < 0) consecutive++;
-    else break;
-  }
-  lossCountConsecutive = consecutive;
-  hedge = lossCountConsecutive >= 5;
-  log(`🔁 Profit table sync -> consecutive losses: ${lossCountConsecutive} | Hedge: ${hedge ? "ON" : "OFF"}`);
-}
-
-/* === CONNECTION & RECONNECT === */
-function connect() {
-  const url = `wss://ws.derivws.com/websockets/v3?app_id=${APP_ID}`;
-  ws = new WSClass(url);
-
-  ws.onopen = () => {
-    reconnectTries = 0;
-    log("🌐 Connected to Deriv WS");
-    // The older API used { authorize: TOKEN } — keep same as your original flow.
-    sendSafe({ authorize: TOKEN });
-  };
-
-  ws.onmessage = (msg) => {
-    let data;
-    try {
-      data = JSON.parse(msg.data);
-    } catch (err) {
-      return log("⚠️ Non-JSON message:", msg.data);
+    console.log("❌ Range too wide — no trade.");
+    if (!isTickSubscribed) {
+      sendWhenReady({ ticks: SYMBOL, subscribe: 1 });
+      isTickSubscribed = true;
     }
-    if (data.error) return log("⚠️ Error:", data.error.message);
-
-    switch (data.msg_type) {
-      case "authorize":
-        authorized = true;
-        log("✅ Authorized. Requesting last trades for hedge check...");
-        // Request recent profit_table to check recent trades
-        sendSafe({ profit_table: 1, limit: PROFIT_TABLE_LIMIT });
-        break;
-
-      case "profit_table": {
-        const lastTx = (data.profit_table && data.profit_table.transactions) || [];
-        log(`📊 Received profit_table with ${lastTx.length} transactions`);
-        // recompute consecutive losses (start from newest transaction)
-        recomputeLossesFromProfitTable(lastTx);
-        // Request small history to prime ticks, then subscribe to live ticks
-        sendSafe({ ticks_history: SYMBOL, count: HIST_LEN, end: "latest" });
-        break;
-      }
-
-      case "history":
-        // depending on API naming: `history.prices` or `history.prices` exists in old code
-        if (data.history && data.history.prices) {
-          ticks = data.history.prices.map(Number);
-          // ensure we only keep HIST_LEN
-          ticks = ticks.slice(-HIST_LEN);
-          log(`📈 Loaded ${ticks.length} historical ticks`);
-          sendSafe({ ticks: SYMBOL, subscribe: 1 });
-          log("📡 Subscribed to live ticks for", SYMBOL);
-        } else {
-          log("⚠️ Unexpected history payload:", data);
-        }
-        break;
-
-      case "tick": {
-        const price = Number(data.tick.quote);
-        if (Number.isNaN(price)) {
-          log("⚠️ Ignoring NaN tick:", data.tick);
-          break;
-        }
-        ticks.push(price);
-        if (ticks.length > HIST_LEN) ticks.shift();
-        log(`💹 Tick: ${price.toFixed(5)} | tickCount: ${ticks.length}`);
-
-        if (!tradeActive && !cooldown && ticks.length >= SMA_LONG) {
-          analyze(price);
-        }
-        break;
-      }
-
-      case "buy":
-        // buy response: store buy_id and subscribe to open contract updates
-        lastTradeId = data.buy && data.buy.buy_id;
-        tradeActive = true;
-        log(`🎯 Trade opened | ID: ${lastTradeId}`);
-        if (lastTradeId) sendSafe({ proposal_open_contract: 1, contract_id: lastTradeId, subscribe: 1 });
-        break;
-
-      case "proposal_open_contract": {
-        const c = data.proposal_open_contract;
-        if (!c) break;
-        // When open contract becomes sold, this indicates closure
-        if (c.is_sold) {
-          tradeActive = false;
-          const profit = Number(c.profit || 0);
-          log(`💰 Trade closed | ID:${c.contract_id || lastTradeId} | Entry: ${c.entry_spot} | Exit: ${c.exit_spot} | Profit: ${profit.toFixed(2)} USD`);
-          // update local stake/lose counters
-          updateStakeFromProfit(profit);
-          // Request profit_table again to remain in sync (and detect hedge state robustly)
-          sendSafe({ profit_table: 1, limit: PROFIT_TABLE_LIMIT });
-
-          // start cooldown
-          startCooldown();
-        } else {
-          // open contract ongoing; log some useful info
-          log(`📌 Open contract update | ID:${c.contract_id || lastTradeId} | entry:${c.entry_spot}`);
-        }
-        break;
-      }
-
-      default:
-        // handle other message types lightly
-        // log("🔹 msg_type:", data.msg_type);
-        break;
-    }
-  };
-
-  ws.onerror = (e) => {
-    // Browser error event may not include message; handle gracefully
-    const errMsg = e && e.message ? e.message : JSON.stringify(e);
-    log("❌ WebSocket error:", errMsg);
-  };
-
-  ws.onclose = (ev) => {
-    log(`🔌 Connection closed (code: ${ev && ev.code ? ev.code : "unknown"})`);
-    // attempt reconnect with exponential backoff (cap)
-    reconnectTries++;
-    const backoff = Math.min(30_000, 1000 * Math.pow(1.6, Math.min(10, reconnectTries)));
-    log(`♻️ Reconnecting in ${Math.round(backoff)} ms... (attempt ${reconnectTries})`);
-    setTimeout(() => connect(), backoff);
-  };
-}
-
-/* === COOLDOWN === */
-function startCooldown() {
-  cooldown = true;
-  setTimeout(() => {
-    cooldown = false;
-    log("⏳ Cooldown finished. Ready for entries.");
-  }, COOLDOWN_MS);
-}
-
-/* === ANALYZE & TRADE === */
-function analyze(price) {
-  const past = ticks[ticks.length - 15];
-  if (typeof past === "undefined") return;
-
-  const diff = price - past;
-  const smaShort = sma(ticks, SMA_SHORT);
-  const smaLong = sma(ticks, SMA_LONG);
-  const vol = volatility(ticks.slice(-SMA_LONG));
-
-  log(`📊 Analyzing | Now: ${price.toFixed(5)} | 15t ago: ${past.toFixed(5)} | Δ: ${diff.toFixed(5)} | SMA${SMA_SHORT}:${smaShort ? smaShort.toFixed(5) : "n/a"} | SMA${SMA_LONG}:${smaLong ? smaLong.toFixed(5) : "n/a"} | Vol:${vol.toFixed(5)}`);
-
-  // Volatility filter: skip small-moving markets
-  if (vol < VOL_THRESHOLD) {
-    log("😴 Market too quiet (vol < threshold). Skipping entry.");
-    return;
-  }
-
-  // Trend confirmation: require short SMA to confirm the direction
-  const trendUp = smaShort !== null && smaLong !== null && smaShort > smaLong;
-  const trendDown = smaShort !== null && smaLong !== null && smaShort < smaLong;
-
-  if (diff >= PRICE_DIFF && trendDown) {
-    log(`🔻 SELL signal confirmed | Diff: +${diff.toFixed(3)} >= ${PRICE_DIFF} and trendDown`);
-    trade("PUT");
-  } else if (diff <= -PRICE_DIFF && trendUp) {
-    log(`🔼 BUY signal confirmed | Diff: ${diff.toFixed(3)} <= -${PRICE_DIFF} and trendUp`);
-    trade("CALL");
-  } else {
-    log("🔎 Signal not confirmed by trend or diff not large enough. No trade.");
   }
 }
 
-/* === BUY CONTRACT === */
-function trade(type) {
-  if (tradeActive) return log("⏳ Trade already active. Waiting for close...");
-  if (cooldown) return log("⏳ In cooldown. Skipping trade attempt.");
-
-  // stake may be doubled in hedge mode
-  const stake = +( (hedge ? STAKE * 2 : STAKE) ).toFixed(2);
-  log(`🚀 Attempting to open ${type} | Stake: ${stake} | Duration: ${DURATION}s | Hedge: ${hedge ? "ON" : "OFF"}`);
-
-  const payload = {
-    buy: 1,
-    price: 100,
-    parameters: {
+/* === Trade operations === */
+function requestProposals() {
+  if (proposalsRequested) return console.log("Proposals already requested.");
+  proposalsRequested = true;
+  resetCycle();
+  console.log("Requesting proposals...");
+  ["CALL", "PUT"].forEach(type => {
+    sendWhenReady({
+      proposal: 1,
       amount: stake,
       basis: "stake",
       contract_type: type,
       currency: "USD",
       duration: DURATION,
-      duration_unit: "s",
+      duration_unit: DURATION_UNIT,
       symbol: SYMBOL,
-    },
-  };
-
-  sendSafe(payload);
-  // mark tradeActive optimistically; will be cleared when closed (or on error)
-  tradeActive = true;
+    });
+  });
 }
 
-/* === START === */
-connect();
+function handleProposal(data) {
+  const type = data.echo_req.contract_type;
+  if (!type) return;
+  contracts[type] = data.proposal.id;
+  console.log(`💼 Proposal ready: ${type}`);
 
-// export for Node.js (optional) to allow require(...) usage and external control
-if (typeof module !== "undefined" && module.exports) {
-  module.exports = {
-    connect,
-    getState: () => ({
-      ticks,
-      tradeActive,
-      cooldown,
-      hedge,
-      STAKE,
-      lossCountConsecutive,
-    }),
-  };
+  if (contracts.CALL && contracts.PUT && !buyInProgress) {
+    buyInProgress = true;
+    console.log("🚀 Buying CALL + PUT...");
+    ["CALL", "PUT"].forEach(t => sendWhenReady({ buy: contracts[t], price: stake }));
+  }
+}
+
+function handleBuy(data) {
+  const id = data.buy.contract_id;
+  if (!id) return;
+  const type = data.echo_req.buy === contracts.CALL ? "CALL" : "PUT";
+  activeContracts[type] = id;
+  console.log(`📈 Trade opened: ${type} → ID=${id}`);
+  sendWhenReady({ proposal_open_contract: 1, contract_id: id, subscribe: 1 });
+}
+
+function handlePOC(data) {
+  const poc = data.proposal_open_contract;
+  if (!poc) return;
+  const type = poc.contract_type;
+  const profit = +poc.profit;
+  const sold = poc.is_sold;
+  console.log(`POC ${type} profit=${profit.toFixed(2)} sold=${sold}`);
+  if (sold) {
+    results[type] = profit;
+    if (results.CALL !== null && results.PUT !== null) evaluateFinal();
+  }
+}
+
+function evaluateFinal() {
+  const net = (results.CALL || 0) + (results.PUT || 0);
+  console.log(`🏁 Final result → NET=${net.toFixed(2)}`);
+  ws.close();
 }
