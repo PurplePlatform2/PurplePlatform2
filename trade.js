@@ -1,207 +1,177 @@
-// TRADERXY.JS — 15-tick candle version (range-based strategy)
+/****************************************************
+ * Deriv Volatility Strategy (Production Build)
+ * Author: Dr. Sanne Karibo
+ * Strategy: 15-tick volatility breakout (σ > 0.25 → CALL/PUT)
+ * Compatible: Node.js & Browser
+ ****************************************************/
 
-const APP_ID = 1089;
-const TOKEN = "tUgDTQ6ZclOuNBl";
-const SYMBOL = "stpRNG";
-const BASE_STAKE = 0.35;
-const DURATION = 15;
-const DURATION_UNIT = "s";
-const HISTORY_COUNT = 46;
+(() => {
+  "use strict";
 
-const WS_URL = `wss://ws.derivws.com/websockets/v3?app_id=${APP_ID}`;
-const WSClass =
-  typeof globalThis !== "undefined" && globalThis.WebSocket
-    ? globalThis.WebSocket
-    : (typeof require !== "undefined" ? require("ws") : null);
-if (!WSClass) throw new Error("WebSocket not found.");
+  // === CONFIGURATION ===
+  const CONFIG = {
+    SYMBOL: "stpRNG",       // Volatility market
+    TICK_COUNT: 150,        // Number of ticks to fetch
+    GROUP_SIZE: 15,         // 15-tick candles
+    VOL_THRESHOLD: 0.25,    // Volatility trigger
+    AMOUNT: 1,              // USD stake
+    DURATION: 15,            // Duration in ticks
+    APP_ID: 1089,           // Deriv App ID
+    TOKEN: "tUgDTQ6ZclOuNBl",              // Optional: API token (leave blank for demo)
+  };
 
-let ws = new WSClass(WS_URL);
-
-/* === State === */
-let stake = BASE_STAKE;
-let contracts = { CALL: null, PUT: null };
-let activeContracts = { CALL: null, PUT: null };
-let results = { CALL: null, PUT: null };
-let lastTicks = [];
-let tradeReady = false;
-
-/* === Protection flags === */
-let isTickSubscribed = false;
-let isAuthorizeRequested = false;
-let proposalsRequested = false;
-let buyInProgress = false;
-
-/* === Helpers === */
-function sendWhenReady(msg) {
-  if (ws && ws.readyState === 1) ws.send(JSON.stringify(msg));
-  else setTimeout(() => sendWhenReady(msg), 100);
-}
-
-function resetCycle() {
-  contracts = { CALL: null, PUT: null };
-  activeContracts = { CALL: null, PUT: null };
-  results = { CALL: null, PUT: null };
-  buyInProgress = false;
-  proposalsRequested = false;
-}
-
-const cProfit = r => {
-  const t = typeof r === "string" ? JSON.parse("[" + r.replace(/^\[?|\]?$/g, "") + "]") : r;
-  const i = t.map(x => ({ profit: +(x.sell_price - x.buy_price).toFixed(2) }));
-  return { total: +i.reduce((s, x) => s + x.profit, 0).toFixed(2), stake: +(t.reduce((s, x) => s + x.buy_price, 0) / t.length).toFixed(2) };
-};
-
-/* === 15-tick candle builder === */
-function build15TickCandles(ticks) {
-  const candles = [];
-  for (let i = 0; i + 14 < ticks.length; i += 15) {
-    const slice = ticks.slice(i, i + 15);
-    const open = slice[0].quote;
-    const close = slice[slice.length - 1].quote;
-    const high = Math.max(...slice.map(t => t.quote));
-    const low = Math.min(...slice.map(t => t.quote));
-    candles.push({ open, high, low, close });
-  }
-  return candles;
-}
-
-/* === WebSocket Flow === */
-ws.onopen = () => {
-  console.log("Connected ✅");
-  sendWhenReady({ ticks_history: SYMBOL, count: HISTORY_COUNT, end: "latest", style: "ticks" });
-};
-
-ws.onmessage = (msg) => {
-  const data = JSON.parse(msg.data);
-  if (data.error) return console.error("Error:", data.error.message);
-
-  switch (data.msg_type) {
-    case "history":
-      lastTicks = data.history.prices.map((p, i) => ({ epoch: data.history.times[i], quote: p }));
-      console.log(`📊 Loaded ${lastTicks.length} ticks`);
-      tryRangePattern();
-      break;
-
-    case "tick":
-      lastTicks.push({ epoch: data.tick.epoch, quote: data.tick.quote });
-      if (lastTicks.length > HISTORY_COUNT) lastTicks.shift();
-      console.log(`💹 Tick: ${data.tick.quote}`);
-      if (!tradeReady) tryRangePattern();
-      break;
-
-    case "authorize":
-      console.log("Authorized ✅");
-      sendWhenReady({ profit_table: 1, description: 1, limit: 2, offset: 0, sort: "DESC" });
-      break;
-
-    case "profit_table":
-      const redeem = cProfit(data.profit_table.transactions);
-      console.log(`📒 Profit check → total=${redeem.total}`);
-      requestProposals();
-      break;
-
-    case "proposal":
-      handleProposal(data);
-      break;
-
-    case "buy":
-      handleBuy(data);
-      break;
-
-    case "proposal_open_contract":
-      handlePOC(data);
-      break;
-  }
-};
-
-/* === Core logic: range pattern === */
-function tryRangePattern() {
-  const candles = build15TickCandles(lastTicks);
-  if (candles.length < 3) return console.log("Not enough candles yet.");
-
-  const c2 = candles[candles.length - 2];
-  const c3 = candles[candles.length - 3];
-  const r2 = c2.high - c2.low;
-  const r3 = c3.high - c3.low;
-
-  console.log(`Range check → c2=${r2.toFixed(2)} c3=${r3.toFixed(2)}`);
-
-  if (r2 <= 0.3 && r3 <= 0.3) {
-    console.log("✅ Range condition met → preparing to trade.");
-    tradeReady = true;
-
-    if (!isAuthorizeRequested) {
-      sendWhenReady({ authorize: TOKEN });
-      isAuthorizeRequested = true;
-    } else {
-      sendWhenReady({ profit_table: 1, description: 1, limit: 2, offset: 0, sort: "DESC" });
-    }
+  // === WEBSOCKET SETUP ===
+  let WS;
+  if (typeof window === "undefined") {
+    const { WebSocket } = require("ws");
+    WS = WebSocket;
   } else {
-    console.log("❌ Range too wide — no trade.");
-    if (!isTickSubscribed) {
-      sendWhenReady({ ticks: SYMBOL, subscribe: 1 });
-      isTickSubscribed = true;
+    WS = window.WebSocket;
+  }
+
+  const ws = new WS(`wss://ws.derivws.com/websockets/v3?app_id=${CONFIG.APP_ID}`);
+
+  ws.onopen = () => {
+    console.log("🦊 Connected to Deriv WebSocket");
+    if (CONFIG.TOKEN) {
+      ws.send(JSON.stringify({ authorize: CONFIG.TOKEN }));
+    } else {
+      requestTicks();
+    }
+  };
+
+  ws.onmessage = (msg) => {
+    const data = safeParse(msg.data || msg);
+    if (!data) return;
+
+    if (data.error) {
+      console.error("❌ API Error:", data.error.message);
+      reconnect();
+      return;
+    }
+
+    if (data.authorize) {
+      console.log(`🔑 Authorized as ${data.authorize.loginid}`);
+      requestTicks();
+      return;
+    }
+
+    if (data.history?.prices) {
+      handleTickHistory(data.history.prices.map(Number));
+      return;
+    }
+
+    if (data.proposal) {
+      console.log("💰 Proposal received — executing trade...");
+      ws.send(JSON.stringify({ buy: data.proposal.id, price: CONFIG.AMOUNT }));
+      return;
+    }
+
+    if (data.buy) {
+      console.log(`✅ Trade executed: Contract ID ${data.buy.contract_id}`);
+      ws.close();
+      return;
+    }
+  };
+
+  ws.onerror = (err) => {
+    console.error("⚠️ WebSocket Error:", err.message || err);
+    reconnect();
+  };
+
+  ws.onclose = () => console.log("🔒 WebSocket closed.");
+
+  // === CORE LOGIC ===
+  function handleTickHistory(ticks) {
+    console.log(`✅ Received ${ticks.length} ticks for ${CONFIG.SYMBOL}`);
+
+    const candles = buildCandles(ticks, CONFIG.GROUP_SIZE);
+    if (!candles.length) {
+      console.warn("⚠️ Not enough data to build candles.");
+      ws.close();
+      return;
+    }
+
+    const last = candles[candles.length - 1];
+    console.log(
+      `📊 Last Candle → O:${last.open.toFixed(2)} H:${last.high.toFixed(2)} L:${last.low.toFixed(2)} C:${last.close.toFixed(2)} σ:${last.volatility.toFixed(5)}`
+    );
+
+    // --- Decision Logic ---
+    if (last.volatility > CONFIG.VOL_THRESHOLD ) {
+      const direction = last.close > last.open ? "CALL" : "PUT";
+      console.log(`🚀 Volatility spike detected! Executing ${direction} trade...`);
+
+      if (CONFIG.TOKEN) {
+        sendProposal(direction);
+      } else {
+        console.log(`💡 DEMO: Would place ${direction} trade now.`);
+        ws.close();
+      }
+    } else {
+      console.log(`😴 Volatility too low (${last.volatility.toFixed(3)} < ${CONFIG.VOL_THRESHOLD})`);
+      ws.close();
     }
   }
-}
 
-/* === Trade operations === */
-function requestProposals() {
-  if (proposalsRequested) return console.log("Proposals already requested.");
-  proposalsRequested = true;
-  resetCycle();
-  console.log("Requesting proposals...");
-  ["CALL", "PUT"].forEach(type => {
-    sendWhenReady({
+  // === HELPERS ===
+  function requestTicks() {
+    ws.send(JSON.stringify({
+      ticks_history: CONFIG.SYMBOL,
+      count: CONFIG.TICK_COUNT,
+      end: "latest",
+      style: "ticks"
+    }));
+  }
+
+  function sendProposal(direction) {
+    ws.send(JSON.stringify({
       proposal: 1,
-      amount: stake,
+      amount: CONFIG.AMOUNT,
       basis: "stake",
-      contract_type: type,
+      contract_type: direction,
       currency: "USD",
-      duration: DURATION,
-      duration_unit: DURATION_UNIT,
-      symbol: SYMBOL,
-    });
-  });
-}
-
-function handleProposal(data) {
-  const type = data.echo_req.contract_type;
-  if (!type) return;
-  contracts[type] = data.proposal.id;
-  console.log(`💼 Proposal ready: ${type}`);
-
-  if (contracts.CALL && contracts.PUT && !buyInProgress) {
-    buyInProgress = true;
-    console.log("🚀 Buying CALL + PUT...");
-    ["CALL", "PUT"].forEach(t => sendWhenReady({ buy: contracts[t], price: stake }));
+      duration: CONFIG.DURATION,
+      duration_unit: "s",
+      symbol: CONFIG.SYMBOL
+    }));
   }
-}
 
-function handleBuy(data) {
-  const id = data.buy.contract_id;
-  if (!id) return;
-  const type = data.echo_req.buy === contracts.CALL ? "CALL" : "PUT";
-  activeContracts[type] = id;
-  console.log(`📈 Trade opened: ${type} → ID=${id}`);
-  sendWhenReady({ proposal_open_contract: 1, contract_id: id, subscribe: 1 });
-}
+  function buildCandles(ticks, group) {
+    const candles = [];
+    for (let i = 0; i < ticks.length; i += group) {
+      const slice = ticks.slice(i, i + group);
+      if (slice.length < group) break;
 
-function handlePOC(data) {
-  const poc = data.proposal_open_contract;
-  if (!poc) return;
-  const type = poc.contract_type;
-  const profit = +poc.profit;
-  const sold = poc.is_sold;
-  console.log(`POC ${type} profit=${profit.toFixed(2)} sold=${sold}`);
-  if (sold) {
-    results[type] = profit;
-    if (results.CALL !== null && results.PUT !== null) evaluateFinal();
+      const open = slice[0];
+      const close = slice[slice.length - 1];
+      const high = Math.max(...slice);
+      const low = Math.min(...slice);
+      const mean = slice.reduce((a, b) => a + b, 0) / slice.length;
+      const variance = slice.reduce((a, b) => a + Math.pow(b - mean, 2), 0) / slice.length;
+      const volatility = Math.sqrt(variance);
+
+      candles.push({ open, close, high, low, mean, volatility });
+    }
+    return candles;
   }
-}
 
-function evaluateFinal() {
-  const net = (results.CALL || 0) + (results.PUT || 0);
-  console.log(`🏁 Final result → NET=${net.toFixed(2)}`);
-  ws.close();
-}
+  function safeParse(json) {
+    try { return JSON.parse(json); }
+    catch (e) {
+      console.error("⚠️ Failed to parse message:", json);
+      return null;
+    }
+  }
+
+  function reconnect() {
+    console.log("🔄 Attempting reconnection in 3s...");
+    setTimeout(() => {
+      if (typeof window === "undefined") {
+        process.exit(0); // restart for Node.js (use pm2 or nodemon)
+      } else {
+        location.reload(); // refresh browser
+      }
+    }, 3000);
+  }
+})();
