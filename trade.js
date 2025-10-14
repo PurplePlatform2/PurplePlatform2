@@ -1,176 +1,221 @@
-/* =====================================================
- *  ATR 1-Minute Range Strategy (Node.js + Browser)
+/****************************************************
+ *  TRADERXY_1MIN.js — 1-Minute Range Strategy
  *  Author: Dr. Sanne Karibo
- *  Description: Checks last 1-minute candle.
- *               If range >= 2.2 → trade in candle direction.
- *               Manages ALL open multiplier contracts
- *               (including those not opened by this script),
- *               closing each when its profit target hits.
- * ===================================================== */
+ *  Description:
+ *   - Every minute, checks if (high - low) ≤ 0.5
+ *   - If true → places simultaneous BUY + SELL (CALL + PUT)
+ *   - Runs continuously with auto-refresh each minute
+ ****************************************************/
 
-// === Auto-detect WebSocket implementation ===
-let WSClass;
-if (typeof window !== "undefined" && window.WebSocket) WSClass = window.WebSocket;
-else WSClass = require("ws");
-
-// === CONFIG ===
-const APP_ID = 1089;                // Your Deriv App ID
-const token = "tUgDTQ6ZclOuNBl";    // 🔐 Replace with real token
+const APP_ID = 1089;
+const TOKEN = "tUgDTQ6ZclOuNBl";
 const SYMBOL = "stpRNG";
-const STAKE = 10;
-const MULTIPLIER = 2000;
-const RANGE_THRESHOLD = 2.2;        // ATR threshold
-const MAX_PROFIT = 0.01;            // close when reached
-const TIMEFRAME = 60;               // 1-minute candles
+const BASE_STAKE = 1;
+const DURATION =59;           // trade lasts 60 seconds
+const DURATION_UNIT = "s";
+const TICK_COUNT = 300;        // fetch 5 min worth of ticks (safety buffer)
 
-// === STATE ===
-let ws, authorized = false;
-let openContracts = new Map(); // {id: profit}
+const WS_URL = `wss://ws.derivws.com/websockets/v3?app_id=${APP_ID}`;
+const WSClass =
+  typeof globalThis !== "undefined" && globalThis.WebSocket
+    ? globalThis.WebSocket
+    : (typeof require !== "undefined" ? require("ws") : null);
+if (!WSClass) throw new Error("WebSocket not found.");
 
-// === INIT ===
-function connect() {
-  ws = new WSClass(`wss://ws.derivws.com/websockets/v3?app_id=${APP_ID}`);
-  ws.onopen = () => ws.send(JSON.stringify({ authorize: token }));
-  ws.onmessage = handleMessage;
-  ws.onerror = (err) => console.error("⚠️ WebSocket error:", err.message || err);
+let ws = new WSClass(WS_URL);
+
+/* === State === */
+let lastTicks = [];
+let stake = BASE_STAKE;
+let tradeReady = false;
+let contracts = { CALL: null, PUT: null };
+let activeContracts = { CALL: null, PUT: null };
+let results = { CALL: null, PUT: null };
+let isAuthorizeRequested = false;
+let proposalsRequested = false;
+let buyInProgress = false;
+
+/* === Helper === */
+function sendWhenReady(msg) {
+  if (ws.readyState === 1) ws.send(JSON.stringify(msg));
+  else setTimeout(() => sendWhenReady(msg), 100);
 }
 
-// === MESSAGE HANDLER ===
-function handleMessage(msg) {
-  const data = JSON.parse(msg.data || msg);
+function resetCycle() {
+  contracts = { CALL: null, PUT: null };
+  activeContracts = { CALL: null, PUT: null };
+  results = { CALL: null, PUT: null };
+  tradeReady = false;
+  proposalsRequested = false;
+  buyInProgress = false;
+}
 
-  if (data.error) return console.error("❌ Error:", data.error.message);
+/* === Build 1-minute candle === */
+function build1MinuteCandles(ticks) {
+  if (!ticks.length) return [];
+  const candles = [];
+  let current = [];
+  let startEpoch = Math.floor(ticks[0].epoch / 60) * 60;
+
+  for (const tick of ticks) {
+    const minuteStart = Math.floor(tick.epoch / 60) * 60;
+    if (minuteStart !== startEpoch) {
+      if (current.length > 0) {
+        const open = current[0].quote;
+        const close = current[current.length - 1].quote;
+        const high = Math.max(...current.map(t => t.quote));
+        const low = Math.min(...current.map(t => t.quote));
+        candles.push({ open, high, low, close });
+      }
+      startEpoch = minuteStart;
+      current = [];
+    }
+    current.push(tick);
+  }
+
+  // push last candle
+  if (current.length > 0) {
+    const open = current[0].quote;
+    const close = current[current.length - 1].quote;
+    const high = Math.max(...current.map(t => t.quote));
+    const low = Math.min(...current.map(t => t.quote));
+    candles.push({ open, high, low, close });
+  }
+
+  return candles;
+}
+
+/* === Core: range check === */
+function checkRangeAndTrade() {
+  const candles = build1MinuteCandles(lastTicks);
+  if (candles.length < 2) return console.log("⏳ Waiting for more data...");
+
+  const recent = candles[candles.length - 2]; // last completed 1-min candle
+  const range = +(recent.high - recent.low).toFixed(2);
+  console.log(`🕐 1-min candle range = ${range}`);
+
+  if (range <= 0.5) {
+    console.log("✅ Range ≤ 0.5 → prepare trade (CALL + PUT)");
+    tradeReady = true;
+    if (!isAuthorizeRequested) {
+      sendWhenReady({ authorize: TOKEN });
+      isAuthorizeRequested = true;
+    } else {
+      requestProposals();
+    }
+  } else {
+    console.log("❌ Range > 0.5 → skip trade.");
+  }
+}
+
+/* === WebSocket Flow === */
+ws.onopen = () => {
+  console.log("✅ Connected to Deriv WebSocket");
+  sendWhenReady({ ticks_history: SYMBOL, count: TICK_COUNT, end: "latest", style: "ticks" });
+};
+
+ws.onmessage = (msg) => {
+  const data = JSON.parse(msg.data);
+  if (data.error) return console.error("Error:", data.error.message);
 
   switch (data.msg_type) {
-    case "authorize":
-      authorized = true;
-      console.log("✅ Authorized:", data.authorize.loginid);
-      fetchOpenContracts();       // ← NEW: manage already open contracts
-      subscribeCandles();
+    case "history":
+      lastTicks = data.history.prices.map((p, i) => ({
+        epoch: data.history.times[i],
+        quote: p,
+      }));
+      console.log(`📊 Loaded ${lastTicks.length} ticks`);
+      checkRangeAndTrade();
+      scheduleNextCheck();
       break;
 
-    case "candles":
-      if (data.candles?.length) analyzeCandle(data.candles);
+    case "authorize":
+      console.log("🔐 Authorized");
+      requestProposals();
+      break;
+
+    case "proposal":
+      handleProposal(data);
       break;
 
     case "buy":
-      const cid = data.buy.contract_id;
-      console.log("🟢 Bought contract:", cid);
-      openContracts.set(cid, 0);
-      subscribeContract(cid);
+      handleBuy(data);
       break;
 
     case "proposal_open_contract":
-      manageContract(data.proposal_open_contract);
+      handlePOC(data);
       break;
 
-    case "portfolio":
-      if (data.portfolio?.contracts?.length) {
-        data.portfolio.contracts.forEach(c => {
-          if (!openContracts.has(c.contract_id)) {
-            console.log(`📥 Found existing open contract: ${c.contract_id}`);
-            openContracts.set(c.contract_id, 0);
-            subscribeContract(c.contract_id);
-          }
-        });
-      } else {
-        console.log("📭 No existing open contracts found.");
-      }
-      break;
-
-    default:
+    case "tick":
+      lastTicks.push({ epoch: data.tick.epoch, quote: data.tick.quote });
+      if (lastTicks.length > TICK_COUNT) lastTicks.shift();
       break;
   }
+};
+
+/* === Auto re-check every minute === */
+function scheduleNextCheck() {
+  console.log("⏰ Waiting for next minute...");
+  setTimeout(() => {
+    resetCycle();
+    sendWhenReady({ ticks_history: SYMBOL, count: TICK_COUNT, end: "latest", style: "ticks" });
+  }, 60 * 1000);
 }
 
-// === FETCH ANY CURRENTLY OPEN CONTRACTS ===
-function fetchOpenContracts() {
-  console.log("📡 Fetching open contracts...");
-  ws.send(JSON.stringify({ portfolio: 1 }));
-}
-
-// === SUBSCRIBE TO 1-MINUTE CANDLES ===
-function subscribeCandles() {
-  console.log("📡 Subscribing to 1-minute candles...");
-  ws.send(JSON.stringify({
-    ticks_history: SYMBOL,
-    count: 2,
-    style: "candles",
-    end: "latest",
-    granularity: TIMEFRAME,
-    subscribe: 1,
-  }));
-}
-
-// === ANALYZE LAST COMPLETED CANDLE ===
-function analyzeCandle(candles) {
-  const last = candles[0];
-  if (!last) return console.log("No finished candle found");
-
-  const nowSec = Math.floor(Date.now() / 1000);
-  if (nowSec - last.epoch < TIMEFRAME) return; // still forming
-
-  const range = last.high - last.low;
-  const bullish = last.close > last.open;
-  const bearish = last.close < last.open;
-
-  console.log(
-    `🕒 Candle ${new Date(last.epoch * 1000).toLocaleTimeString()} | O:${last.open} H:${last.high} L:${last.low} C:${last.close} | Range=${range.toFixed(2)}`
-  );
-
-  if (range >= RANGE_THRESHOLD) {
-    const type = bullish ? "MULTUP" : bearish ? "MULTDOWN" : null;
-    if (type) executeTrade(type);
-  }
-}
-
-// === EXECUTE TRADE ===
-function executeTrade(contract_type) {
-  ws.send(JSON.stringify({
-    buy: 1,
-    price: STAKE,
-    parameters: {
-      amount: STAKE,
+/* === Trade ops === */
+function requestProposals() {
+  if (proposalsRequested) return;
+  proposalsRequested = true;
+  console.log("🧾 Requesting proposals...");
+  ["CALL", "PUT"].forEach(type => {
+    sendWhenReady({
+      proposal: 1,
+      amount: stake,
       basis: "stake",
-      contract_type,
+      contract_type: type,
       currency: "USD",
-      multiplier: MULTIPLIER,
+      duration: DURATION,
+      duration_unit: DURATION_UNIT,
       symbol: SYMBOL,
-    },
-  }));
-  console.log(`🚀 Sent ${contract_type} trade`);
+    });
+  });
 }
 
-// === SUBSCRIBE TO CONTRACT UPDATES ===
-function subscribeContract(contract_id) {
-  ws.send(JSON.stringify({
-    proposal_open_contract: 1,
-    contract_id,
-    subscribe: 1,
-  }));
-}
+function handleProposal(data) {
+  const type = data.echo_req.contract_type;
+  if (!type) return;
+  contracts[type] = data.proposal.id;
+  console.log(`💼 Proposal ready: ${type}`);
 
-// === MANAGE CONTRACTS ===
-function manageContract(poc) {
-  if (!poc || !poc.contract_id) return;
-  const cid = poc.contract_id;
-  const profit = poc.profit || 0;
-
-  if (poc.status === "open") {
-    console.log(
-      `📈 Contract ${cid}: entry=${poc.buy_price}, current=${poc.current_spot}, profit=${profit}`
-    );
-
-    if (profit >= MAX_PROFIT) {
-      console.log(`💰 Profit ${profit} reached — closing ${cid}`);
-      ws.send(JSON.stringify({ sell: cid, price: 0 }));
-    }
-  } else if (poc.status !== "open") {
-    console.log(`🏁 Contract ${cid} closed. Final profit: ${profit}`);
-    openContracts.delete(cid);
-    if (openContracts.size === 0) console.log("✅ All contracts closed.");
+  if (contracts.CALL && contracts.PUT && !buyInProgress) {
+    buyInProgress = true;
+    console.log("🚀 Buying CALL + PUT...");
+    ["CALL", "PUT"].forEach(t => sendWhenReady({ buy: contracts[t], price: stake }));
   }
 }
 
-// === START ===
-connect();
+function handleBuy(data) {
+  const id = data.buy.contract_id;
+  const type = data.echo_req.buy === contracts.CALL ? "CALL" : "PUT";
+  activeContracts[type] = id;
+  console.log(`📈 Trade opened: ${type} (ID: ${id})`);
+  sendWhenReady({ proposal_open_contract: 1, contract_id: id, subscribe: 1 });
+}
+
+function handlePOC(data) {
+  const poc = data.proposal_open_contract;
+  if (!poc) return;
+  const type = poc.contract_type;
+  const profit = +poc.profit;
+  const sold = poc.is_sold;
+  console.log(`📊 ${type}: profit=${profit.toFixed(2)} sold=${sold}`);
+  if (sold) results[type] = profit;
+}
+
+/* === Reconnect if closed === */
+ws.onclose = () => {
+  console.log("🔄 Reconnecting...");
+  setTimeout(() => {
+    ws = new WSClass(WS_URL);
+  }, 3000);
+};
