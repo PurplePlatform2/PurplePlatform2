@@ -8,7 +8,7 @@
  ****************************************************/
 
 const APP_ID = 1089;
-const TOKEN = "tUgDTQ6ZclOuNBl";
+const TOKEN = "1Ej5Kd5yebuR6LN";
 const SYMBOL = "stpRNG";
 const BASE_STAKE = 1;
 const DURATION =59;           // trade lasts 60 seconds
