@@ -2,11 +2,9 @@
  * 🎯 Martingale 5-Minute Candle Strategy for Deriv (Exact TraderXY cProfit)
  * Author: Dr. Sanne Karibo
  *
+ * ✅ Works in Browser + Node.js (no await/import issues)
  * ✅ Uses TraderXY-style cProfit() → profit = sell_price - buy_price.
- * ✅ Only evaluates the latest closed trade.
- * ✅ If last trade was LOSS → doubles stake (max 8× Base_Stake).
- * ✅ If exceeds limit → resets to Base_Stake.
- * ✅ Uses 5-minute candles for direction & re-entry.
+ * ✅ 5-min candle strategy with automatic re-entry & stake doubling.
  */
 
 const token = 'tUgDTQ6ZclOuNBl'; // 🔐 Replace with your real token
@@ -19,8 +17,25 @@ let tradeDirection = null;
 let proposalId = null;
 let waitingNextCandle = false;
 
-const ws = new WebSocket('wss://ws.derivws.com/websockets/v3?app_id=1089');
+// ===============================
+// 🌍 Cross-Environment WebSocket Setup
+// ===============================
+let WebSocketClass;
 
+if (typeof WebSocket !== 'undefined') {
+  // ✅ Browser
+  WebSocketClass = WebSocket;
+} else {
+  // ✅ Node.js
+  const WS = require('ws');
+  WebSocketClass = WS;
+}
+
+const ws = new WebSocketClass('wss://ws.derivws.com/websockets/v3?app_id=1089');
+
+// ===============================
+// 🧾 Logger
+// ===============================
 function log(msg, data = '') {
   const time = new Date().toLocaleTimeString();
   console.log(`[${time}] ${msg}`, data || '');
@@ -35,7 +50,7 @@ ws.onopen = () => {
 };
 
 ws.onmessage = (msg) => {
-  const data = JSON.parse(msg.data);
+  const data = JSON.parse(msg.data || msg);
   if (data.error) {
     log('❌ Error:', data.error.message);
     return;
@@ -171,7 +186,6 @@ function getLastProfit() {
   }));
 }
 
-// 🔍 TraderXY’s exact logic (sell_price - buy_price)
 function cProfit(lastTrade) {
   if (!lastTrade) return { profit: 0, stake: 0, type: 'N/A' };
 
