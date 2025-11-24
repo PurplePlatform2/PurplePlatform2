@@ -1,258 +1,303 @@
-/**
- * 🎯 Martingale 5-Minute Candle Strategy for Deriv (Exact TraderXY cProfit)
- * Author: Dr. Sanne Karibo
- *
- * ✅ Works in Browser + Node.js (no await/import issues)
- * ✅ Uses TraderXY-style cProfit() → profit = sell_price - buy_price.
- * ✅ 5-min candle strategy with automatic re-entry & stake doubling.
- */
+// TRADERXY.JS (15-tick candle version) — martingale removed
 
-const token = 'tUgDTQ6ZclOuNBl'; // 🔐 Replace with your real token
-const symbol = 'stpRNG';
-const Base_Stake = 1;
-let currentStake = Base_Stake;
+const APP_ID = 1089;
+const TOKEN = "tUgDTQ6ZclOuNBl";
+const SYMBOL = "stpRNG";
+const BASE_STAKE = 0.35;
+const DURATION = 15;
+const DURATION_UNIT = "s";
+const HISTORY_COUNT = 46; // pull 46 ticks
 
-let lastTradeId = null;
-let tradeDirection = null;
-let proposalId = null;
-let waitingNextCandle = false;
+const WS_URL = `wss://ws.derivws.com/websockets/v3?app_id=${APP_ID}`;
+const WSClass =
+  typeof globalThis !== "undefined" && globalThis.WebSocket
+    ? globalThis.WebSocket
+    : (typeof require !== "undefined" ? require("ws") : null);
 
-// ===============================
-// 🌍 Cross-Environment WebSocket Setup
-// ===============================
-let WebSocketClass;
+if (!WSClass) throw new Error("WebSocket not found. Use browser or install 'ws'.");
 
-if (typeof WebSocket !== 'undefined') {
-  // ✅ Browser
-  WebSocketClass = WebSocket;
-} else {
-  // ✅ Node.js
-  const WS = require('ws');
-  WebSocketClass = WS;
+let ws = new WSClass(WS_URL);
+
+/* === State === */
+let stake = BASE_STAKE;
+let contracts = { CALL: null, PUT: null };
+let activeContracts = { CALL: null, PUT: null };
+let results = { CALL: null, PUT: null };
+let lastTicks = [];
+let tradeReady = false;
+
+/* === Protection flags === */
+let isTickSubscribed = false;
+let isAuthorizeRequested = false;
+let proposalsRequested = false;
+let buyInProgress = false;
+
+/* === Helpers === */
+function sendWhenReady(msg) {
+  if (ws && ws.readyState === 1) {
+    ws.send(JSON.stringify(msg));
+  } else {
+    const tryOnce = () => {
+      if (ws && ws.readyState === 1) ws.send(JSON.stringify(msg));
+      else setTimeout(() => {
+        if (ws && ws.readyState === 1) ws.send(JSON.stringify(msg));
+      }, 250);
+    };
+    setTimeout(tryOnce, 50);
+  }
 }
 
-const ws = new WebSocketClass('wss://ws.derivws.com/websockets/v3?app_id=1089');
-
-// ===============================
-// 🧾 Logger
-// ===============================
-function log(msg, data = '') {
-  const time = new Date().toLocaleTimeString();
-  console.log(`[${time}] ${msg}`, data || '');
+function resetCycle() {
+  contracts = { CALL: null, PUT: null };
+  activeContracts = { CALL: null, PUT: null };
+  results = { CALL: null, PUT: null };
+  buyInProgress = false;
+  proposalsRequested = false;
 }
 
-// ===============================
-// 🔌 WebSocket Lifecycle
-// ===============================
+/* === Initial Flow === */
 ws.onopen = () => {
-  log('🌐 Connecting to Deriv...');
-  ws.send(JSON.stringify({ authorize: token }));
+  console.log("Connected ✅");
+  sendWhenReady({
+    ticks_history: SYMBOL,
+    count: HISTORY_COUNT,
+    end: "latest",
+    style: "ticks",
+  });
 };
 
 ws.onmessage = (msg) => {
-  const data = JSON.parse(msg.data || msg);
+  const data = JSON.parse(msg.data);
   if (data.error) {
-    log('❌ Error:', data.error.message);
+    console.error("Error:", data.error.message);
     return;
   }
 
   switch (data.msg_type) {
-    case 'authorize':
-      log(`✅ Authorized as ${data.authorize.loginid}`);
-      getLastProfit();
+    case "history":
+      lastTicks = data.history.prices.map((p, i) => ({
+        epoch: data.history.times[i],
+        quote: p,
+      }));
+      console.log(`📊 Loaded ${lastTicks.length} ticks`);
+      tryPatternAndTradeFromTicks();
       break;
-    case 'profit_table':
-      handleProfitTable(data);
+
+    case "tick":
+      handleTick(data.tick);
       break;
-    case 'candles':
-      handleCandleData(data);
+
+    case "authorize":
+      console.log("Authorized response received.");
+      isAuthorizeRequested = true;
+      sendWhenReady({"profit_table":1,"description":1,"limit":2,"offset":0,"sort":"DESC"});
       break;
-    case 'proposal':
+
+    case "proposal":
       handleProposal(data);
       break;
-    case 'buy':
+
+    case "profit_table":
+      let redeem = cProfit(data.profit_table.transactions);
+      if (redeem.total < 0) {
+        console.log("\n**Recieved History>>loss::", redeem.total);
+        stake = redeem.stake ;
+        requestProposals();
+      } else {
+        console.log("Previous trade profitable::", redeem.total);
+        requestProposals();
+      }
+      break;
+
+    case "buy":
       handleBuy(data);
       break;
-    case 'proposal_open_contract':
-      handleOpenContract(data);
+
+    case "proposal_open_contract":
+      handlePOC(data);
       break;
   }
 };
 
-// ===============================
-// 📊 Candle Data Logic
-// ===============================
-function fetchCandles() {
-  ws.send(JSON.stringify({
-    ticks_history: symbol,
-    count: 3,
-    granularity: 300, // 5-minute candles
-    end: 'latest',
-    style: 'candles'
-  }));
-}
-
-function handleCandleData(data) {
-  const candles = data.candles;
-  if (!candles?.length) return;
-
-  const last = candles[candles.length - 1];
-  const prev = candles[candles.length - 2];
-
-  const direction = decideDirection(prev, last);
-  tradeDirection = direction;
-
-  log(`📊 Candle closed at ${last.close}. Strategy suggests: ${direction}`);
-  sendProposal(direction);
-}
-
-function decideDirection(prev, last) {
-  const diff = last.close - prev.close;
-  return diff > 0 ? 'CALL' : 'PUT';
-}
-
-// ===============================
-// 💸 Trade Proposal & Execution
-// ===============================
-function sendProposal(direction) {
-  log(`🧾 Requesting proposal → ${direction} | Stake: $${currentStake}`);
-  ws.send(JSON.stringify({
-    proposal: 1,
-    amount: currentStake,
-    basis: 'stake',
-    contract_type: direction,
-    currency: 'USD',
-    duration: 59,
-    duration_unit: 's',
-    symbol
-  }));
-}
-
-function handleProposal(data) {
-  proposalId = data.proposal.id;
-  log(`💡 Proposal ready → ${data.proposal.contract_type} | Payout: $${data.proposal.payout.toFixed(2)}`);
-  ws.send(JSON.stringify({ buy: proposalId, price: currentStake }));
-}
-
-function handleBuy(data) {
-  lastTradeId = data.buy.contract_id;
-  log(`🟢 Trade executed: ${tradeDirection} | Contract ID: ${lastTradeId}`);
-
-  ws.send(JSON.stringify({
-    proposal_open_contract: 1,
-    contract_id: lastTradeId,
-    subscribe: 1
-  }));
-}
-
-// ===============================
-// 🧠 Contract Status Tracking
-// ===============================
-function handleOpenContract(data) {
-  const poc = data.proposal_open_contract;
-  if (!poc) return;
-
-  if (poc.status === 'open') {
-    const profit = parseFloat(poc.profit).toFixed(2);
-    const current = parseFloat(poc.current_spot).toFixed(4);
-    log(`📡 Live Contract → Profit: $${profit} | Spot: ${current}`);
-  } else {
-    const buy = parseFloat(poc.buy_price) || 0;
-    const sell = parseFloat(poc.sell_price || poc.current_spot) || 0;
-    const profit = +(sell - buy).toFixed(2);
-
-    log(`🏁 Contract Closed:
-       → ${profit > 0 ? '✅ WIN' : '❌ LOSS'}
-       → Entry: $${buy.toFixed(2)}
-       → Exit: $${sell.toFixed(2)}
-       → Profit/Loss: $${profit.toFixed(2)}
-    `);
-
-    ws.send(JSON.stringify({ forget_all: 'proposal_open_contract' }));
-    getLastProfit();
-    waitForNextCandle();
+/* === Build 15-tick candles === */
+function build15TickCandles(ticks) {
+  const candles = [];
+  for (let i = 0; i + 14 < ticks.length; i += 15) {
+    const slice = ticks.slice(i, i + 15);
+    candles.push({
+      open: slice[0].quote,
+      close: slice[slice.length - 1].quote,
+      high: Math.max(...slice.map(t => t.quote)),
+      low: Math.min(...slice.map(t => t.quote))
+    });
   }
+  return candles;
 }
 
-// ===============================
-// 💰 Profit Check (Exact TraderXY logic)
-// ===============================
-function getLastProfit() {
-  ws.send(JSON.stringify({
-    profit_table: 1,
-    description: 1,
-    limit: 1, // ✅ Only last trade
-    sort: 'DESC'
-  }));
-}
-
-function cProfit(lastTrade) {
-  if (!lastTrade) return { profit: 0, stake: 0, type: 'N/A' };
-
-  const buy = parseFloat(lastTrade.buy_price) || 0;
-  const sell = parseFloat(lastTrade.sell_price) || 0;
-  const profit = +(sell - buy).toFixed(2);
-  const type = lastTrade.contract_type || 'Unknown';
-
+const cProfit = r => {
+  const t = typeof r==="string"?JSON.parse("["+r.replace(/^\[?|\]?$/g,"")+"]"):r;
+  const i = t.map(x=>({id:x.contract_id,type:x.contract_type,profit:+(x.sell_price-x.buy_price).toFixed(2)}));
   return {
-    profit,
-    stake: buy.toFixed(2),
-    type
+    individual:i,
+    total:+i.reduce((s,x)=>s+x.profit,0).toFixed(2),
+    stake:+(t.reduce((s,x)=>s+x.buy_price,0)/t.length).toFixed(2)
   };
-}
+};
 
-function handleProfitTable(data) {
-  const lastTrade = data.profit_table.transactions?.[0];
-  if (!lastTrade) {
-    log('ℹ️ No previous trades found. Starting fresh...');
-    fetchCandles();
+/* === Pattern Detection === */
+function tryPatternAndTradeFromTicks() {
+  const candles = build15TickCandles(lastTicks);
+
+  console.log(`Built ${candles.length} candles from ${lastTicks.length} ticks`);
+
+  if (candles.length < 3) {
+    console.log("Not enough candles to test tomRed/tomGreen");
     return;
   }
 
-  const cp = cProfit(lastTrade);
-  const profit = cp.profit;
-  const stake = parseFloat(cp.stake);
+  const c1 = candles[candles.length - 1];
+  const h2 = candles[candles.length - 2].high;
+  const h3 = candles[candles.length - 3].high;
+  const l2 = candles[candles.length - 2].low;
+  const l3 = candles[candles.length - 3].low;
 
-  log(`📋 Last Trade Summary:
-       → Contract: ${cp.type}
-       → Stake: $${stake}
-       → Profit/Loss: $${profit.toFixed(2)}
-  `);
+  const tomRed =true || c1.close > Math.max(h2, h3);
+  const tomGreen =true || c1.close < Math.min(l2, l3);
 
-  if (profit < 0) {
-    currentStake = Math.min(stake * 2, Base_Stake * 8);
-    if (currentStake >= Base_Stake * 8) {
-      log('🛑 Reached 8× Base Stake. Resetting to Base.');
-      currentStake = Base_Stake;
+  const lastRangeOK = (c1.high - c1.low) <= 0.3;
+
+  console.log(`tomRed=${tomRed} tomGreen=${tomGreen} rangeOK=${lastRangeOK}`);
+
+  /** ENTRY CONDITION FIXED HERE **/
+  if ((tomRed || tomGreen) && lastRangeOK) {
+    console.log("🚀 tom pattern + low-range candle → entering CALL+PUT");
+
+    tradeReady = true;
+    if (!isAuthorizeRequested) {
+      console.log("Requesting authorization...");
+      sendWhenReady({ authorize: TOKEN });
+      isAuthorizeRequested = true;
     } else {
-      log(`📉 LOSS detected. Increasing stake → $${currentStake}`);
+      if (!proposalsRequested)
+        sendWhenReady({"profit_table":1,"description":1,"limit":2,"offset":0,"sort":"DESC"});
     }
-  } else if (profit > 0) {
-    currentStake = Base_Stake;
-    log(`💰 WIN detected. Resetting stake → $${currentStake}`);
   } else {
-    log('ℹ️ Neutral result or still open.');
+    console.log("No entry signal yet.");
+    if (!isTickSubscribed) {
+      console.log("Subscribing to live ticks...");
+      sendWhenReady({ ticks: SYMBOL, subscribe: 1 });
+      isTickSubscribed = true;
+    }
   }
-
-  if (!waitingNextCandle) fetchCandles();
 }
 
-// ===============================
-// ⏳ Candle Wait Timer
-// ===============================
-function waitForNextCandle() {
-  waitingNextCandle = true;
-  const now = new Date();
+/* === Tick Handler === */
+function handleTick(tick) {
+  lastTicks.push({ epoch: tick.epoch, quote: tick.quote });
+  if (lastTicks.length > HISTORY_COUNT) lastTicks.shift();
 
-  const msToNext5Min =
-    (5 - (now.getMinutes() % 5)) * 60 * 1000 -
-    (now.getSeconds() * 1000 + now.getMilliseconds());
+  console.log(`💹 Tick: ${tick.quote}`);
 
-  const secs = (msToNext5Min / 1000).toFixed(1);
-  log(`⏳ Waiting ${secs}s for next 5-min candle...`);
+  if (!tradeReady && lastTicks.length >= HISTORY_COUNT) {
+    tryPatternAndTradeFromTicks();
+  }
+}
 
-  setTimeout(() => {
-    waitingNextCandle = false;
-    fetchCandles();
-  }, msToNext5Min + 1500);
+/* === Proposal & Buying === */
+function requestProposals() {
+  if (proposalsRequested) return console.log("Proposals already requested.");
+  proposalsRequested = true;
+  resetCycle();
+
+  console.log("Requesting proposals for CALL and PUT...");
+
+  ["CALL","PUT"].forEach(type => {
+    sendWhenReady({
+      proposal:1,
+      amount:stake,
+      basis:"stake",
+      contract_type:type,
+      currency:"USD",
+      duration:DURATION,
+      duration_unit:DURATION_UNIT,
+      symbol:SYMBOL
+    });
+  });
+}
+
+function handleProposal(data) {
+  const echo = data.echo_req || {};
+  const contractType = echo.contract_type;
+
+  if (!contractType) return console.warn("Unknown proposal type.");
+
+  const proposalId = data.proposal && data.proposal.id;
+  if (!proposalId) return console.warn("Proposal has no ID.");
+
+  contracts[contractType] = proposalId;
+  console.log(`Proposal for ${contractType} → id=${proposalId}`);
+
+  if (contracts.CALL && contracts.PUT && !buyInProgress) {
+    buyInProgress = true;
+    console.log("Buying CALL & PUT...");
+    ["CALL","PUT"].forEach(type =>
+      sendWhenReady({ buy: contracts[type], price: stake })
+    );
+  }
+}
+
+function handleBuy(data) {
+  const buyRes = data.buy;
+  if (!buyRes) return;
+
+  const contractId = buyRes.contract_id;
+  if (!contractId) return;
+
+  const echoBuy = data.echo_req && data.echo_req.buy;
+  let typeFound = null;
+
+  if (echoBuy === contracts.CALL) typeFound = "CALL";
+  else if (echoBuy === contracts.PUT) typeFound = "PUT";
+  else typeFound = !activeContracts.CALL ? "CALL" : "PUT";
+
+  activeContracts[typeFound] = contractId;
+  console.log(`Trade opened: ${typeFound}, ID=${contractId}, stake=${stake}`);
+
+  sendWhenReady({
+    proposal_open_contract: 1,
+    contract_id: contractId,
+    subscribe: 1
+  });
+}
+
+function handlePOC(data) {
+  const poc = data.proposal_open_contract;
+  if (!poc) return;
+
+  const type = poc.contract_type;
+  const profit = +poc.profit;
+  const isSold = !!poc.is_sold;
+
+  console.log(`POC ${type} profit=${profit.toFixed(2)} sold=${isSold}`);
+
+  if (isSold) {
+    results[type] = profit;
+    if (results.CALL !== null && results.PUT !== null) {
+      evaluateFinal();
+    }
+  }
+}
+
+function evaluateFinal() {
+  const net = (results.CALL || 0) + (results.PUT || 0);
+  console.log(`Final results → NET=${net}`);
+
+  if (net > 0) {
+    console.log("✅ PROFIT — Exiting.");
+  } else {
+    console.log("❌ LOSS — Resetting stake.");
+    stake = BASE_STAKE;
+  }
+
+  ws.close();
 }
