@@ -101,7 +101,7 @@ ws.onmessage = (msg) => {
       let redeem = cProfit(data.profit_table.transactions);
       if (redeem.total < 0) {
         console.log("\n**Recieved History>>loss::", redeem.total);
-        stake = redeem.stake ;
+        stake = redeem.stake*5 ;
         requestProposals();
       } else {
         console.log("Previous trade profitable::", redeem.total);
